@@ -1,19 +1,33 @@
 import { useState, useRef, useEffect } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { db, getProductByBarcode, getNextBonNumber, checkStockDisponible, bufferToBase64 } from '../db';
+import { db, getProductByBarcode, getNextBonNumber, checkStockDisponible, bufferToBase64, type StockIssue } from '../db';
 import { Plus, Trash2, Check, ScanLine, Paperclip, X, FileText, Image, AlertTriangle, ChevronDown } from 'lucide-react';
 import BarcodeScanner from '../components/BarcodeScanner';
+import type { NavigateFn } from '../types';
+import type { Product } from '../../shared/schemas';
 
-function ProductSearch({ products, value, onChange }) {
+interface MovementItem {
+  productId: string;
+  quantity: string | number;
+  note: string;
+}
+
+interface ProductSearchProps {
+  products: Product[] | undefined;
+  value: string;
+  onChange: (value: string) => void;
+}
+
+function ProductSearch({ products, value, onChange }: ProductSearchProps) {
   const [query, setQuery]   = useState('');
   const [open,  setOpen]    = useState(false);
-  const ref = useRef();
+  const ref = useRef<HTMLDivElement>(null);
 
   const selected = products?.find(p => String(p.id) === String(value));
 
   // Fermer si clic extérieur
   useEffect(() => {
-    function handle(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }
+    function handle(e: MouseEvent) { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); }
     document.addEventListener('mousedown', handle);
     return () => document.removeEventListener('mousedown', handle);
   }, []);
@@ -27,7 +41,7 @@ function ProductSearch({ products, value, onChange }) {
     );
   }).slice(0, 50);
 
-  function select(p) {
+  function select(p: Product) {
     onChange(String(p.id));
     setQuery('');
     setOpen(false);
@@ -43,7 +57,7 @@ function ProductSearch({ products, value, onChange }) {
       <div
         className="flex items-center gap-1 px-2 py-2 border border-slate-200 rounded-lg bg-white cursor-text"
         style={{ minHeight: 38 }}
-        onClick={() => { setOpen(true); ref.current.querySelector('input').focus(); }}
+        onClick={() => { setOpen(true); ref.current?.querySelector('input')?.focus(); }}
       >
         {!open && selected ? (
           <span className="flex-1 text-sm text-slate-700 truncate">
@@ -96,30 +110,40 @@ function ProductSearch({ products, value, onChange }) {
   );
 }
 
-export default function NewMovement({ navigate }) {
+interface NewMovementProps {
+  navigate: NavigateFn;
+}
+
+interface AttachedFile {
+  name: string;
+  type: string;
+  data: ArrayBuffer;
+}
+
+export default function NewMovement({ navigate }: NewMovementProps) {
   const products = useLiveQuery(() => db.products.toArray(), []);
-  const [items, setItems] = useState([{ productId: '', quantity: 1, note: '' }]);
+  const [items, setItems] = useState<MovementItem[]>([{ productId: '', quantity: 1, note: '' }]);
   const [destination, setDestination] = useState('');
   const [note, setNote] = useState('');
-  const [file, setFile] = useState(null);       // { name, type, data (ArrayBuffer) }
+  const [file, setFile] = useState<AttachedFile | null>(null);
   const [saving, setSaving] = useState(false);
-  const [scanningIdx, setScanningIdx] = useState(null);
-  const [stockIssues, setStockIssues] = useState([]);
-  const fileRef = useRef();
+  const [scanningIdx, setScanningIdx] = useState<number | null>(null);
+  const [stockIssues, setStockIssues] = useState<StockIssue[]>([]);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   function addItem() {
     setItems(i => [...i, { productId: '', quantity: 1, note: '' }]);
   }
-  function removeItem(idx) {
+  function removeItem(idx: number) {
     setItems(i => i.filter((_, j) => j !== idx));
     setStockIssues([]);
   }
-  function updateItem(idx, field, val) {
+  function updateItem(idx: number, field: keyof MovementItem, val: string) {
     setItems(i => i.map((item, j) => j === idx ? { ...item, [field]: val } : item));
     setStockIssues([]);
   }
 
-  async function handleScan(code) {
+  async function handleScan(code: string) {
     setScanningIdx(null);
     const found = await getProductByBarcode(code);
     if (found) {
@@ -131,19 +155,19 @@ export default function NewMovement({ navigate }) {
     }
   }
 
-  async function handleFile(e) {
-    const f = e.target.files[0];
+  async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
     if (!f) return;
     const data = await f.arrayBuffer();
     setFile({ name: f.name, type: f.type, data });
     e.target.value = '';
   }
 
-  function getStep(productId) {
+  function getStep(productId: string) {
     const p = products?.find(p => p.id === Number(productId));
-    return ['m', 'm²', 'm³', 'mètre linéaire'].includes(p?.unit) ? '0.001' : '1';
+    return p?.unit && ['m', 'm²', 'm³', 'mètre linéaire'].includes(p.unit) ? '0.001' : '1';
   }
-  function getUnit(productId) {
+  function getUnit(productId: string) {
     return products?.find(p => p.id === Number(productId))?.unit || '';
   }
 
@@ -175,7 +199,7 @@ export default function NewMovement({ navigate }) {
       fileName: file?.name || null,
       fileType: file?.type || null,
       fileData,
-    });
+    }) as number; // l'id auto-incrémenté est toujours défini une fois l'ajout terminé
 
     for (const item of valid) {
       await db.bonItems.add({
@@ -349,7 +373,7 @@ export default function NewMovement({ navigate }) {
           </div>
         ) : (
           <button
-            onClick={() => fileRef.current.click()}
+            onClick={() => fileRef.current?.click()}
             className="w-full flex items-center justify-center gap-2 py-3 border-2 border-dashed border-slate-200 rounded-lg text-sm text-slate-400 hover:border-indigo-300 hover:text-indigo-500 transition-colors"
           >
             <Paperclip size={16} />

@@ -1,8 +1,19 @@
+import type { ReactNode, CSSProperties } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db';
 import { Package, ArrowDownCircle, FileText, AlertTriangle, TrendingUp, ArrowUpRight, ArrowDownRight } from 'lucide-react';
+import type { NavigateFn } from '../types';
+import type { Product } from '../../shared/schemas';
 
-export default function Dashboard({ navigate }) {
+interface DashboardProps {
+  navigate: NavigateFn;
+}
+
+interface StockRow extends Product {
+  qty: number;
+}
+
+export default function Dashboard({ navigate }: DashboardProps) {
   const products  = useLiveQuery(() => db.products.toArray(), []);
   const allMvts   = useLiveQuery(() => db.movements.toArray(), []);
   const bonsCount = useLiveQuery(() => db.bons.count(), []);
@@ -14,8 +25,8 @@ export default function Dashboard({ navigate }) {
   const stockMap = useLiveQuery(async () => {
     const prods = await db.products.toArray();
     const mvts  = await db.movements.toArray();
-    const map   = {};
-    prods.forEach(p => { map[p.id] = { ...p, qty: Number(p.stockInitial) || 0 }; });
+    const map: Record<number, StockRow> = {};
+    prods.forEach(p => { if (p.id != null) map[p.id] = { ...p, qty: Number(p.stockInitial) || 0 }; });
     mvts.forEach(m => {
       if (!map[m.productId]) return;
       if (m.type === 'entree') map[m.productId].qty += m.quantity;
@@ -24,8 +35,8 @@ export default function Dashboard({ navigate }) {
     return map;
   }, []);
 
-  const prodMap = {};
-  products?.forEach(p => { prodMap[p.id] = p; });
+  const prodMap: Record<number, Product> = {};
+  products?.forEach(p => { if (p.id != null) prodMap[p.id] = p; });
 
   const lowStock   = stockMap ? Object.values(stockMap).filter(p => p.minStock > 0 && p.qty <= p.minStock) : [];
   const emptyStock = stockMap ? Object.values(stockMap).filter(p => p.qty <= 0) : [];
@@ -89,7 +100,7 @@ export default function Dashboard({ navigate }) {
                   {lowStock.length} article(s) en stock faible
                 </div>
               </div>
-              <div className="divide-y" style={{ divideColor: '#fef9c3' }}>
+              <div className="divide-y" style={{ divideColor: '#fef9c3' } as CSSProperties}>
                 {lowStock.slice(0, 5).map(p => (
                   <div key={p.id} className="flex items-center justify-between px-5 py-2.5">
                     <div>
@@ -202,7 +213,7 @@ export default function Dashboard({ navigate }) {
 
               <div className="divide-y divide-slate-50">
                 {recent?.map(m => {
-                  const prod     = prodMap[m.productId];
+                  const prod     = m.productId != null ? prodMap[m.productId] : undefined;
                   const isSortie = m.type === 'sortie';
                   return (
                     <div
@@ -245,7 +256,17 @@ export default function Dashboard({ navigate }) {
   );
 }
 
-function KpiCard({ icon, label, value, sub, accentColor, alert, onClick }) {
+interface KpiCardProps {
+  icon: ReactNode;
+  label: string;
+  value: number;
+  sub: string;
+  accentColor: string;
+  alert?: boolean;
+  onClick: () => void;
+}
+
+function KpiCard({ icon, label, value, sub, accentColor, alert, onClick }: KpiCardProps) {
   return (
     <button
       onClick={onClick}
@@ -276,7 +297,16 @@ function KpiCard({ icon, label, value, sub, accentColor, alert, onClick }) {
   );
 }
 
-function QuickAction({ label, sub, color, bg, icon, onClick }) {
+interface QuickActionProps {
+  label: string;
+  sub: string;
+  color: string;
+  bg: string;
+  icon: ReactNode;
+  onClick: () => void;
+}
+
+function QuickAction({ label, sub, color, bg, icon, onClick }: QuickActionProps) {
   return (
     <button
       onClick={onClick}

@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeStockDisponible, findStockIssues } from '../src/db.js';
+import { computeStockDisponible, findStockIssues } from '../src/db.ts';
 
 describe('computeStockDisponible', () => {
   test('additionne le stock initial et les entrées', () => {
@@ -46,7 +46,7 @@ describe('findStockIssues', () => {
 
   test('ignore les lignes sans produit ou sans quantité', () => {
     const stock = new Map();
-    const issues = findStockIssues([{ productId: null, quantity: 10 }, { productId: 1, quantity: 0 }], stock);
+    const issues = findStockIssues([{ productId: null as unknown as number, quantity: 10 }, { productId: 1, quantity: 0 }], stock);
     assert.deepEqual(issues, []);
   });
 });

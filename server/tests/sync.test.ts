@@ -1,10 +1,10 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { startTestServer } from './helpers.js';
+import { startTestServer, type TestServer } from './helpers.ts';
 
 describe('sync push/pull', () => {
-  let server;
-  let token;
+  let server: TestServer;
+  let token: string;
 
   before(async () => {
     server = await startTestServer({ adminUsername: 'admin', adminPassword: 'test-password' });

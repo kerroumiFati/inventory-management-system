@@ -3,25 +3,38 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { db, getProductByBarcode } from '../db';
 import { ArrowUpCircle, Check, X, BarChart2, ScanLine, Search, AlertTriangle } from 'lucide-react';
 import BarcodeScanner from '../components/BarcodeScanner';
+import type { NavigateFn } from '../types';
+import type { Product } from '../../shared/schemas';
 
-const isMeter = u => ['m', 'm²', 'm³', 'mètre linéaire'].includes(u);
+interface StockProps {
+  navigate: NavigateFn;
+}
 
-function fmt(val, unit) {
+interface StockRow extends Product {
+  qty: number;
+  qteUtilisee: number;
+}
+
+type FilterKey = 'all' | 'low' | 'empty';
+
+const isMeter = (u: string | undefined) => !!u && ['m', 'm²', 'm³', 'mètre linéaire'].includes(u);
+
+function fmt(val: number, unit: string | undefined) {
   if (isMeter(unit)) return `${parseFloat(val.toFixed(3))} ${unit}`;
   return `${val} ${unit || ''}`.trim();
 }
 
-export default function Stock({ navigate }) {
-  const [addModal, setAddModal] = useState(null);
+export default function Stock({ navigate }: StockProps) {
+  const [addModal, setAddModal] = useState<StockRow | null>(null);
   const [scanner,  setScanner]  = useState(false);
   const [search,   setSearch]   = useState('');
-  const [filter,   setFilter]   = useState('all'); // all | low | empty
+  const [filter,   setFilter]   = useState<FilterKey>('all');
 
   const stockData = useLiveQuery(async () => {
     const prods = await db.products.toArray();
     const mvts  = await db.movements.toArray();
-    const map   = {};
-    prods.forEach(p => { map[p.id] = { ...p, qty: Number(p.stockInitial) || 0, qteUtilisee: 0 }; });
+    const map: Record<number, StockRow> = {};
+    prods.forEach(p => { if (p.id != null) map[p.id] = { ...p, qty: Number(p.stockInitial) || 0, qteUtilisee: 0 }; });
     mvts.forEach(m => {
       if (!map[m.productId]) return;
       const qty = Number(m.quantity);
@@ -50,7 +63,7 @@ export default function Stock({ navigate }) {
   const lowCount   = stockData?.filter(p => p.minStock > 0 && p.qty > 0 && p.qty <= p.minStock).length ?? 0;
   const emptyCount = stockData?.filter(p => p.qty <= 0).length ?? 0;
 
-  async function saveEntree(productId, qty, note) {
+  async function saveEntree(productId: number, qty: string, note: string) {
     await db.movements.add({
       productId: Number(productId),
       type: 'entree',
@@ -62,7 +75,7 @@ export default function Stock({ navigate }) {
     setAddModal(null);
   }
 
-  async function handleScan(code) {
+  async function handleScan(code: string) {
     setScanner(false);
     const found = await getProductByBarcode(code);
     if (found) {
@@ -73,7 +86,7 @@ export default function Stock({ navigate }) {
     }
   }
 
-  const FILTERS = [
+  const FILTERS: { key: FilterKey; label: string; count: number; warn?: boolean; danger?: boolean }[] = [
     { key: 'all',   label: 'Tous',         count: stockData?.length ?? 0 },
     { key: 'low',   label: 'Stock faible', count: lowCount,   warn: true },
     { key: 'empty', label: 'Épuisé',       count: emptyCount, danger: true },
@@ -245,7 +258,13 @@ export default function Stock({ navigate }) {
   );
 }
 
-function EntreeModal({ product, onSave, onClose }) {
+interface EntreeModalProps {
+  product: StockRow;
+  onSave: (productId: number, qty: string, note: string) => void;
+  onClose: () => void;
+}
+
+function EntreeModal({ product, onSave, onClose }: EntreeModalProps) {
   const [qty,  setQty]  = useState('');
   const [note, setNote] = useState('');
   const meter = isMeter(product.unit);
@@ -302,7 +321,7 @@ function EntreeModal({ product, onSave, onClose }) {
             Annuler
           </button>
           <button
-            onClick={() => Number(qty) > 0 && onSave(product.id, qty, note)}
+            onClick={() => Number(qty) > 0 && product.id != null && onSave(product.id, qty, note)}
             className="flex-1 py-2.5 rounded-xl text-sm text-white font-semibold flex items-center justify-center gap-2 hover:opacity-90 transition-opacity"
             style={{ background: '#059669' }}
           >

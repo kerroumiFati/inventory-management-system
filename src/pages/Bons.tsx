@@ -1,9 +1,15 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db, base64ToBlob } from '../db';
 import { FileText, ChevronRight, Search, Paperclip, Download, Trash2, Eye } from 'lucide-react';
-import { useState } from 'react';
+import { useState, type MouseEvent } from 'react';
+import type { NavigateFn } from '../types';
+import type { Bon } from '../../shared/schemas';
 
-export default function Bons({ navigate }) {
+interface BonsProps {
+  navigate: NavigateFn;
+}
+
+export default function Bons({ navigate }: BonsProps) {
   const bons = useLiveQuery(() => db.bons.orderBy('date').reverse().toArray(), []);
   const [search, setSearch] = useState('');
 
@@ -14,28 +20,29 @@ export default function Bons({ navigate }) {
     (b.fileName || '').toLowerCase().includes(search.toLowerCase())
   );
 
-  async function deleteBon(e, bon) {
+  async function deleteBon(e: MouseEvent, bon: Bon) {
     e.stopPropagation();
     if (!confirm(`Supprimer le bon ${bon.number} et ses mouvements ?`)) return;
+    if (bon.id == null) return;
     await db.bonItems.where('bonId').equals(bon.id).delete();
     await db.movements.where('bonNumber').equals(bon.number).delete();
     await db.bons.delete(bon.id);
   }
 
-  function openFile(e, bon) {
+  function openFile(e: MouseEvent, bon: Bon) {
     e.stopPropagation();
-    const blob = base64ToBlob(bon.fileData, bon.fileType);
+    const blob = base64ToBlob(bon.fileData!, bon.fileType);
     const url = URL.createObjectURL(blob);
     window.open(url, '_blank');
   }
 
-  function downloadFile(e, bon) {
+  function downloadFile(e: MouseEvent, bon: Bon) {
     e.stopPropagation();
-    const blob = base64ToBlob(bon.fileData, bon.fileType);
+    const blob = base64ToBlob(bon.fileData!, bon.fileType);
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = bon.fileName;
+    a.download = bon.fileName || 'fichier';
     a.click();
     URL.revokeObjectURL(url);
   }
