@@ -1,9 +1,9 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { startTestServer } from './helpers.js';
+import { startTestServer, type TestServer } from './helpers.ts';
 
 describe('authentication', () => {
-  let server;
+  let server: TestServer;
 
   before(async () => {
     server = await startTestServer({ adminUsername: 'admin', adminPassword: 'test-password' });

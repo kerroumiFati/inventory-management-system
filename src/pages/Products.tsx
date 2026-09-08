@@ -3,19 +3,37 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db';
 import { Plus, Pencil, Trash2, X, Check, Package, Search, ScanLine } from 'lucide-react';
 import BarcodeScanner from '../components/BarcodeScanner';
+import { ProductSchema } from '../../shared/schemas';
 
 const UNITS = ['pièce', 'kg', 'g', 'litre', 'ml', 'm', 'm²', 'm³', 'mètre linéaire', 'rouleau', 'boîte', 'sachet', 'tonne'];
-const isMeter = u => ['m', 'm²', 'm³', 'mètre linéaire'].includes(u);
-const empty = { name: '', reference: '', barcode: '', category: '', unit: 'pièce', minStock: 0, stockInitial: 0, description: '' };
+const isMeter = (u: string | undefined) => !!u && ['m', 'm²', 'm³', 'mètre linéaire'].includes(u);
+
+// Formulaire : tous les champs en chaînes (contrôlés depuis des <input>), convertis à l'enregistrement.
+type ProductForm = {
+  id?: number;
+  name: string;
+  reference: string;
+  barcode: string;
+  category: string;
+  unit: string;
+  minStock: string | number;
+  stockInitial: string | number;
+  description: string;
+};
+
+const empty: ProductForm = { name: '', reference: '', barcode: '', category: '', unit: 'pièce', minStock: 0, stockInitial: 0, description: '' };
+
+type ScannerTarget = 'search' | 'form' | null;
 
 export default function Products() {
   const products  = useLiveQuery(() => db.products.toArray(), []);
   const movements = useLiveQuery(() => db.movements.toArray(), []);
-  const [form,    setForm]    = useState(null);
+  const [form,    setForm]    = useState<ProductForm | null>(null);
+  const [formError, setFormError] = useState('');
   const [search,  setSearch]  = useState('');
-  const [scanner, setScanner] = useState(null);
+  const [scanner, setScanner] = useState<ScannerTarget>(null);
 
-  const qtyMap = {};
+  const qtyMap: Record<number, number> = {};
   movements?.forEach(m => {
     if (!qtyMap[m.productId]) qtyMap[m.productId] = 0;
     if (m.type === 'entree') qtyMap[m.productId] += m.quantity;
@@ -30,23 +48,24 @@ export default function Products() {
   );
 
   async function save() {
-    if (!form.name.trim()) return;
-    const data = {
-      name:         form.name,
-      reference:    form.reference    || '',
-      barcode:      form.barcode      || '',
-      category:     form.category     || '',
-      unit:         form.unit         || 'pièce',
-      minStock:     Number(form.minStock)     || 0,
+    if (!form) return;
+    const parsed = ProductSchema.safeParse({
+      ...form,
+      minStock: Number(form.minStock) || 0,
       stockInitial: Number(form.stockInitial) || 0,
-      description:  form.description  || '',
-    };
+    });
+    if (!parsed.success) {
+      setFormError(parsed.error.issues[0]?.message || 'Formulaire invalide');
+      return;
+    }
+    const data = parsed.data;
     if (form.id) await db.products.update(form.id, data);
     else         await db.products.add(data);
     setForm(null);
+    setFormError('');
   }
 
-  async function del(id) {
+  async function del(id: number) {
     if (!confirm('Supprimer ce produit ?')) return;
     await db.products.delete(id);
   }
@@ -54,7 +73,7 @@ export default function Products() {
   return (
     <div>
       {scanner === 'search' && <BarcodeScanner onScan={c => { setScanner(null); setSearch(c); }}       onClose={() => setScanner(null)} />}
-      {scanner === 'form'   && <BarcodeScanner onScan={c => { setScanner(null); setForm(f => ({ ...f, barcode: c })); }} onClose={() => setScanner(null)} />}
+      {scanner === 'form'   && <BarcodeScanner onScan={c => { setScanner(null); setForm(f => f ? ({ ...f, barcode: c }) : f); }} onClose={() => setScanner(null)} />}
 
       {/* Header */}
       <div className="flex items-center justify-between mb-5">
@@ -119,8 +138,8 @@ export default function Products() {
           </div>
         )}
 
-        {filtered?.map((p, i) => {
-          const qActuel = Number(p.stockInitial || 0) + (qtyMap[p.id] || 0);
+        {filtered?.map(p => {
+          const qActuel = Number(p.stockInitial || 0) + (p.id != null ? (qtyMap[p.id] || 0) : 0);
           const isLow   = p.minStock > 0 && qActuel <= p.minStock;
           const isEmpty = qActuel <= 0;
           return (
@@ -177,7 +196,7 @@ export default function Products() {
                   <Pencil size={14} />
                 </button>
                 <button
-                  onClick={() => del(p.id)}
+                  onClick={() => p.id != null && del(p.id)}
                   className="p-1.5 rounded-lg text-slate-300 hover:text-red-500 hover:bg-red-50 transition-colors"
                   title="Supprimer"
                 >
@@ -203,11 +222,11 @@ export default function Products() {
             </div>
 
             <div className="overflow-y-auto flex-1 px-6 py-5 space-y-4">
-              <Field label="Libellé *" value={form.name} onChange={v => setForm(f => ({ ...f, name: v }))} />
+              <Field label="Libellé *" value={form.name} onChange={v => setForm(f => f && ({ ...f, name: v }))} />
 
               <div className="grid grid-cols-2 gap-3">
-                <Field label="Référence" value={form.reference} onChange={v => setForm(f => ({ ...f, reference: v }))} />
-                <Field label="Famille"   value={form.category}  onChange={v => setForm(f => ({ ...f, category: v }))} />
+                <Field label="Référence" value={form.reference} onChange={v => setForm(f => f && ({ ...f, reference: v }))} />
+                <Field label="Famille"   value={form.category}  onChange={v => setForm(f => f && ({ ...f, category: v }))} />
               </div>
 
               {/* Code-barres */}
@@ -217,7 +236,7 @@ export default function Products() {
                   <input
                     type="text"
                     value={form.barcode}
-                    onChange={e => setForm(f => ({ ...f, barcode: e.target.value }))}
+                    onChange={e => setForm(f => f && ({ ...f, barcode: e.target.value }))}
                     placeholder="EAN, QR, Code128..."
                     className="flex-1 px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200"
                   />
@@ -236,7 +255,7 @@ export default function Products() {
                 <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide block mb-1.5">Unité</label>
                 <select
                   value={form.unit}
-                  onChange={e => setForm(f => ({ ...f, unit: e.target.value }))}
+                  onChange={e => setForm(f => f && ({ ...f, unit: e.target.value }))}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 bg-white"
                 >
                   {UNITS.map(u => <option key={u} value={u}>{u}</option>)}
@@ -252,7 +271,7 @@ export default function Products() {
                   type="number"
                   step={isMeter(form.unit) ? '0.001' : '1'}
                   value={form.stockInitial}
-                  onChange={v => setForm(f => ({ ...f, stockInitial: v }))}
+                  onChange={v => setForm(f => f && ({ ...f, stockInitial: v }))}
                   suffix={form.unit}
                 />
                 <Field
@@ -260,7 +279,7 @@ export default function Products() {
                   type="number"
                   step={isMeter(form.unit) ? '0.001' : '1'}
                   value={form.minStock}
-                  onChange={v => setForm(f => ({ ...f, minStock: v }))}
+                  onChange={v => setForm(f => f && ({ ...f, minStock: v }))}
                   suffix={form.unit}
                 />
               </div>
@@ -269,18 +288,25 @@ export default function Products() {
                 <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide block mb-1.5">Observations</label>
                 <textarea
                   value={form.description}
-                  onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
+                  onChange={e => setForm(f => f && ({ ...f, description: e.target.value }))}
                   className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 resize-none"
                   rows={3}
                   placeholder="Emplacement, fournisseur, remarque..."
                 />
               </div>
+
+              {formError && (
+                <div className="flex items-start gap-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded-xl px-4 py-3">
+                  <span className="font-semibold shrink-0">!</span>
+                  <span>{formError}</span>
+                </div>
+              )}
             </div>
 
             {/* Actions */}
             <div className="flex gap-3 px-6 py-4" style={{ borderTop: '1px solid #f1f5f9' }}>
               <button
-                onClick={() => setForm(null)}
+                onClick={() => { setForm(null); setFormError(''); }}
                 className="flex-1 py-2.5 border border-slate-200 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-50 transition-colors"
               >
                 Annuler
@@ -300,7 +326,16 @@ export default function Products() {
   );
 }
 
-function Field({ label, value, onChange, type = 'text', step, suffix }) {
+interface FieldProps {
+  label: string;
+  value: string | number;
+  onChange: (value: string) => void;
+  type?: string;
+  step?: string;
+  suffix?: string;
+}
+
+function Field({ label, value, onChange, type = 'text', step, suffix }: FieldProps) {
   return (
     <div>
       <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide block mb-1.5">{label}</label>

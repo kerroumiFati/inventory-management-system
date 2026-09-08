@@ -3,20 +3,28 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { db, base64ToBlob } from '../db';
 import { useReactToPrint } from 'react-to-print';
 import { Printer, ArrowLeft, Trash2, Download, Eye, FileText, Image } from 'lucide-react';
+import type { NavigateFn } from '../types';
+import type { Product } from '../../shared/schemas';
 
-export default function BonDetail({ bonId, navigate }) {
-  const bon      = useLiveQuery(() => bonId ? db.bons.get(bonId) : null, [bonId]);
+interface BonDetailProps {
+  bonId: number | null;
+  navigate: NavigateFn;
+}
+
+export default function BonDetail({ bonId, navigate }: BonDetailProps) {
+  const bon      = useLiveQuery(() => bonId ? db.bons.get(bonId) : undefined, [bonId]);
   const items    = useLiveQuery(() => bonId ? db.bonItems.where('bonId').equals(bonId).toArray() : [], [bonId]);
   const products = useLiveQuery(() => db.products.toArray(), []);
-  const printRef = useRef();
+  const printRef = useRef<HTMLDivElement>(null);
 
-  const prodMap = {};
-  products?.forEach(p => { prodMap[p.id] = p; });
+  const prodMap: Record<number, Product> = {};
+  products?.forEach(p => { if (p.id != null) prodMap[p.id] = p; });
 
   const handlePrint = useReactToPrint({ contentRef: printRef });
 
   async function deleteBon() {
     if (!confirm('Supprimer ce bon définitivement ?')) return;
+    if (bonId == null || !bon) return;
     await db.bonItems.where('bonId').equals(bonId).delete();
     await db.movements.where('bonNumber').equals(bon.number).delete();
     await db.bons.delete(bonId);
@@ -24,17 +32,19 @@ export default function BonDetail({ bonId, navigate }) {
   }
 
   function openFile() {
+    if (!bon?.fileData) return;
     const blob = base64ToBlob(bon.fileData, bon.fileType);
     const url  = URL.createObjectURL(blob);
     window.open(url, '_blank');
   }
 
   function downloadFile() {
+    if (!bon?.fileData) return;
     const blob = base64ToBlob(bon.fileData, bon.fileType);
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href     = url;
-    a.download = bon.fileName;
+    a.download = bon.fileName || 'fichier';
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -61,7 +71,7 @@ export default function BonDetail({ bonId, navigate }) {
             <Trash2 size={15} /> Supprimer
           </button>
           <button
-            onClick={handlePrint}
+            onClick={() => handlePrint()}
             className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm text-white font-medium hover:opacity-90 transition-opacity"
             style={{ background: '#4f46e5' }}
           >

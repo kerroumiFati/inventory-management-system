@@ -3,13 +3,27 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db';
 import * as XLSX from 'xlsx';
 import { Upload, Download, FileSpreadsheet, Check, AlertCircle, Info } from 'lucide-react';
+import type { Product, Bon } from '../../shared/schemas';
+
+type ExcelRow = Record<string, string | number | undefined>;
 
 // Résout une valeur depuis plusieurs noms de colonnes possibles
-function col(row, ...keys) {
+function col(row: ExcelRow, ...keys: string[]): string | number {
   for (const k of keys) {
-    if (row[k] !== undefined && row[k] !== null && row[k] !== '') return row[k];
+    if (row[k] !== undefined && row[k] !== null && row[k] !== '') return row[k] as string | number;
   }
   return '';
+}
+
+interface PreviewState {
+  rows: ExcelRow[];
+  cols: string[];
+  fileName: string;
+}
+
+interface Message {
+  text: string;
+  ok: boolean;
 }
 
 export default function ImportExport() {
@@ -17,17 +31,17 @@ export default function ImportExport() {
   const movements = useLiveQuery(() => db.movements.toArray(), []);
   const bons      = useLiveQuery(() => db.bons.toArray(), []);
   const bonItems  = useLiveQuery(() => db.bonItems.toArray(), []);
-  const fileRef   = useRef();
-  const [msg, setMsg]         = useState(null);
-  const [preview, setPreview] = useState(null); // colonnes détectées avant import
+  const fileRef   = useRef<HTMLInputElement>(null);
+  const [msg, setMsg]         = useState<Message | null>(null);
+  const [preview, setPreview] = useState<PreviewState | null>(null);
 
-  function notify(text, ok = true) {
+  function notify(text: string, ok = true) {
     setMsg({ text, ok });
     setTimeout(() => setMsg(null), 4000);
   }
 
   // ── Export ──────────────────────────────────────────────────────────────────
-  function download(rows, filename, sheetName) {
+  function download(rows: Record<string, unknown>[], filename: string, sheetName: string) {
     const ws = XLSX.utils.json_to_sheet(rows);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, sheetName);
@@ -35,8 +49,9 @@ export default function ImportExport() {
   }
 
   async function exportInventaire() {
+    if (!products) return;
     // Format PRESTINFO : Réf, Libellé, Famille, Q. Actuel
-    const mvtMap = {};
+    const mvtMap: Record<number, number> = {};
     movements?.forEach(m => {
       if (!mvtMap[m.productId]) mvtMap[m.productId] = 0;
       if (m.type === 'entree') mvtMap[m.productId] += m.quantity;
@@ -46,7 +61,7 @@ export default function ImportExport() {
       'Réf':       p.reference || '',
       'Libellé':   p.name,
       'Famille':   p.category || '',
-      'Q. Actuel': (Number(p.stockInitial || 0) + (mvtMap[p.id] || 0)) || '',
+      'Q. Actuel': (Number(p.stockInitial || 0) + (p.id != null ? (mvtMap[p.id] || 0) : 0)) || '',
       'Stock min': p.minStock || '',
       'Unité':     p.unit || '',
       'Code-barres': p.barcode || '',
@@ -56,8 +71,9 @@ export default function ImportExport() {
   }
 
   async function exportMouvements() {
-    const prodMap = {};
-    products?.forEach(p => { prodMap[p.id] = p; });
+    if (!movements) return;
+    const prodMap: Record<number, Product> = {};
+    products?.forEach(p => { if (p.id != null) prodMap[p.id] = p; });
     const rows = movements.map(m => ({
       Date:       m.date?.slice(0, 10),
       Type:       m.type === 'entree' ? 'Entrée' : 'Sortie',
@@ -72,13 +88,14 @@ export default function ImportExport() {
   }
 
   async function exportBons() {
-    const prodMap = {};
-    products?.forEach(p => { prodMap[p.id] = p; });
-    const bonMap = {};
-    bons?.forEach(b => { bonMap[b.id] = b; });
+    if (!bonItems) return;
+    const prodMap: Record<number, Product> = {};
+    products?.forEach(p => { if (p.id != null) prodMap[p.id] = p; });
+    const bonMap: Record<number, Bon> = {};
+    bons?.forEach(b => { if (b.id != null) bonMap[b.id] = b; });
     const rows = bonItems.map(item => {
-      const bon  = bonMap[item.bonId] || {};
-      const prod = prodMap[item.productId] || {};
+      const bon: Partial<Bon> = bonMap[item.bonId] || {};
+      const prod: Partial<Product> = prodMap[item.productId] || {};
       return {
         'N° Bon':    bon.number || '',
         Date:        bon.date?.slice(0, 10),
@@ -96,13 +113,13 @@ export default function ImportExport() {
   }
 
   // ── Import ───────────────────────────────────────────────────────────────────
-  async function handleFileSelect(e) {
-    const file = e.target.files[0];
+  async function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
     if (!file) return;
     const data = await file.arrayBuffer();
     const wb   = XLSX.read(data);
     const ws   = wb.Sheets[wb.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json(ws);
+    const rows = XLSX.utils.sheet_to_json<ExcelRow>(ws);
     if (!rows.length) return notify('Fichier vide ou non reconnu', false);
 
     // Afficher un aperçu des colonnes détectées
@@ -120,8 +137,8 @@ export default function ImportExport() {
 
     // Charger les produits existants pour dédupliquer
     const existing = await db.products.toArray();
-    const byRef     = {};
-    const byBarcode = {};
+    const byRef: Record<string, typeof existing[number]>     = {};
+    const byBarcode: Record<string, typeof existing[number]> = {};
     existing.forEach(p => {
       if (p.reference) byRef[p.reference.toLowerCase()] = p;
       if (p.barcode)   byBarcode[p.barcode] = p;
@@ -146,13 +163,13 @@ export default function ImportExport() {
       const dupByBarcode = barcode   && byBarcode[barcode];
       const dup          = dupByRef || dupByBarcode;
 
-      if (dup) {
+      if (dup && dup.id != null) {
         // Mettre à jour le produit existant
         await db.products.update(dup.id, { name, reference, barcode, category, unit, stockInitial, minStock, description });
         updated++;
       } else {
         const newProd = { name, reference, barcode, category, unit, stockInitial, minStock, description };
-        const newId   = await db.products.add(newProd);
+        const newId   = await db.products.add(newProd) as number;
         if (reference) byRef[reference.toLowerCase()] = { ...newProd, id: newId };
         if (barcode)   byBarcode[barcode]              = { ...newProd, id: newId };
         count++;
@@ -282,7 +299,7 @@ export default function ImportExport() {
             <FileSpreadsheet size={15} /> Modèle PRESTINFO
           </button>
           <button
-            onClick={() => fileRef.current.click()}
+            onClick={() => fileRef.current?.click()}
             className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm text-white font-medium hover:opacity-90 transition-opacity"
             style={{ background: '#4f46e5' }}
           >
@@ -322,7 +339,15 @@ export default function ImportExport() {
   );
 }
 
-function ExportCard({ title, desc, iconBg, iconColor, onClick }) {
+interface ExportCardProps {
+  title: string;
+  desc: string;
+  iconBg: string;
+  iconColor: string;
+  onClick: () => void;
+}
+
+function ExportCard({ title, desc, iconBg, iconColor, onClick }: ExportCardProps) {
   return (
     <button
       onClick={onClick}

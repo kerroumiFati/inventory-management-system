@@ -1,11 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
-import { BrowserMultiFormatReader } from '@zxing/browser';
+import { BrowserMultiFormatReader, type IScannerControls } from '@zxing/browser';
 import { X, ScanLine, CameraOff } from 'lucide-react';
 
-export default function BarcodeScanner({ onScan, onClose }) {
-  const videoRef = useRef(null);
-  const controlsRef = useRef(null);
-  const [error, setError] = useState(null);
+interface BarcodeScannerProps {
+  onScan: (code: string) => void;
+  onClose: () => void;
+}
+
+export default function BarcodeScanner({ onScan, onClose }: BarcodeScannerProps) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const controlsRef = useRef<IScannerControls | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
 
   useEffect(() => {
@@ -16,8 +21,8 @@ export default function BarcodeScanner({ onScan, onClose }) {
       try {
         const controls = await reader.decodeFromVideoDevice(
           undefined,
-          videoRef.current,
-          (result, err, ctrl) => {
+          videoRef.current ?? undefined,
+          (result, _err, ctrl) => {
             if (!mounted) return;
             if (result) {
               const code = result.getText();
@@ -30,7 +35,7 @@ export default function BarcodeScanner({ onScan, onClose }) {
           controlsRef.current = controls;
           setScanning(true);
         }
-      } catch (e) {
+      } catch {
         if (mounted) setError("Caméra inaccessible. Vérifiez les permissions.");
       }
     }
@@ -39,9 +44,10 @@ export default function BarcodeScanner({ onScan, onClose }) {
 
     return () => {
       mounted = false;
-      try { controlsRef.current?.stop(); } catch (_) {}
+      try { controlsRef.current?.stop(); } catch { /* ignore */ }
       BrowserMultiFormatReader.releaseAllStreams();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- comportement existant : ne pas relancer le scan si onScan change de référence
   }, []);
 
   return (

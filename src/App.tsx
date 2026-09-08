@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ComponentType } from 'react';
 import Dashboard   from './pages/Dashboard';
 import Products    from './pages/Products';
 import NewMovement from './pages/NewMovement';
@@ -9,12 +9,24 @@ import Stock       from './pages/Stock';
 import Login       from './pages/Login';
 import SyncBar     from './components/SyncBar';
 import { useAuth } from './contexts/AuthContext';
+import type { NavigateFn, PageKey } from './types';
 import {
   LayoutDashboard, Package, ArrowDownCircle, FileText,
   FileSpreadsheet, Menu, X, BarChart2, LogOut, User, ChevronRight,
 } from 'lucide-react';
 
-const SECTIONS = [
+interface NavItem {
+  key: PageKey;
+  label: string;
+  icon: ComponentType<{ size?: number }>;
+}
+
+interface NavSection {
+  label: string;
+  items: NavItem[];
+}
+
+const SECTIONS: NavSection[] = [
   {
     label: 'Aperçu',
     items: [{ key: 'dashboard', label: 'Tableau de bord', icon: LayoutDashboard }],
@@ -39,7 +51,7 @@ const SECTIONS = [
   },
 ];
 
-const PAGE_TITLES = {
+const PAGE_TITLES: Record<PageKey, string> = {
   dashboard:   'Tableau de bord',
   stock:       'Niveaux de stock',
   products:    'Produits',
@@ -51,17 +63,17 @@ const PAGE_TITLES = {
 
 export default function App() {
   const { isAuthenticated, user, logout } = useAuth();
-  const [page,     setPage]     = useState('dashboard');
-  const [bonId,    setBonId]    = useState(null);
+  const [page,     setPage]     = useState<PageKey>('dashboard');
+  const [bonId,    setBonId]    = useState<number | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
 
   if (!isAuthenticated) return <Login />;
 
-  function navigate(key, extra) {
+  const navigate: NavigateFn = (key, extra) => {
     setPage(key);
     if (extra?.bonId) setBonId(extra.bonId);
     setMenuOpen(false);
-  }
+  };
 
   const today = new Date().toLocaleDateString('fr-FR', {
     weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',

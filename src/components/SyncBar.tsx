@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
 import { checkServer, pushToServer, pullFromServer } from '../services/sync';
-import { Upload, Download, Wifi, WifiOff, RefreshCw, CheckCircle, AlertCircle } from 'lucide-react';
+import { Upload, Download, RefreshCw, CheckCircle, AlertCircle } from 'lucide-react';
+
+type SyncStatus = 'idle' | 'pushing' | 'pulling' | 'ok' | 'error';
 
 export default function SyncBar() {
   const [online,   setOnline]   = useState(false);
-  const [status,   setStatus]   = useState('idle'); // idle | pushing | pulling | ok | error
+  const [status,   setStatus]   = useState<SyncStatus>('idle');
   const [msg,      setMsg]      = useState('');
   const [checking, setChecking] = useState(false);
 
@@ -20,7 +22,7 @@ export default function SyncBar() {
     return () => clearInterval(id);
   }, [check]);
 
-  function notify(text, ok) {
+  function notify(text: string, ok: boolean) {
     setMsg(text);
     setStatus(ok ? 'ok' : 'error');
     setTimeout(() => { setMsg(''); setStatus('idle'); }, 4000);
@@ -32,7 +34,7 @@ export default function SyncBar() {
       const r = await pushToServer();
       notify(`${r.synced.products} produits · ${r.synced.movements} mouvements · ${r.synced.bons} bons`, true);
     } catch (e) {
-      notify(e.message, false);
+      notify(e instanceof Error ? e.message : String(e), false);
     }
   }
 
@@ -43,7 +45,7 @@ export default function SyncBar() {
       const r = await pullFromServer();
       notify(`${r.products} produits · ${r.movements} mouvements · ${r.bons} bons`, true);
     } catch (e) {
-      notify(e.message, false);
+      notify(e instanceof Error ? e.message : String(e), false);
     }
   }
 

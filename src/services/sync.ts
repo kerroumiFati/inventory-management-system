@@ -1,7 +1,8 @@
 import { db } from '../db';
 import { API_BASE as API } from '../config';
+import { SyncPushRequestSchema } from '../../shared/schemas';
 
-function authHeaders() {
+function authHeaders(): Record<string, string> {
   const token = localStorage.getItem('stock_auth_token');
   return {
     'Content-Type': 'application/json',
@@ -9,7 +10,7 @@ function authHeaders() {
   };
 }
 
-export async function checkServer() {
+export async function checkServer(): Promise<boolean> {
   try {
     const r = await fetch(`${API}/status`, { signal: AbortSignal.timeout(2000) });
     return r.ok;
@@ -27,10 +28,12 @@ export async function pushToServer() {
     db.bonItems.toArray(),
   ]);
 
+  const payload = SyncPushRequestSchema.parse({ products, movements, bons, bonItems });
+
   const res = await fetch(`${API}/sync/push`, {
     method: 'POST',
     headers: authHeaders(),
-    body: JSON.stringify({ products, movements, bons, bonItems }),
+    body: JSON.stringify(payload),
   });
 
   if (res.status === 401) throw new Error('Session expirée. Veuillez vous reconnecter.');
