@@ -1,55 +1,52 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { checkServer, pushToServer, pullFromServer } from '../services/sync';
 import { Upload, Download, RefreshCw, CheckCircle, AlertCircle } from 'lucide-react';
-
-type SyncStatus = 'idle' | 'pushing' | 'pulling' | 'ok' | 'error';
+import { Button } from '@/components/ui/button';
 
 export default function SyncBar() {
-  const [online,   setOnline]   = useState(false);
-  const [status,   setStatus]   = useState<SyncStatus>('idle');
-  const [msg,      setMsg]      = useState('');
-  const [checking, setChecking] = useState(false);
+  const queryClient = useQueryClient();
 
-  const check = useCallback(async () => {
-    setChecking(true);
-    setOnline(await checkServer());
-    setChecking(false);
-  }, []);
+  const { data: online = false, isFetching: checking, refetch } = useQuery({
+    queryKey: ['server-status'],
+    queryFn: checkServer,
+    refetchInterval: 15000,
+  });
 
-  useEffect(() => {
-    check();
-    const id = setInterval(check, 15000);
-    return () => clearInterval(id);
-  }, [check]);
+  const pushMutation = useMutation({
+    mutationFn: pushToServer,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['server-status'] }),
+    onSettled: () => { setTimeout(() => pushMutation.reset(), 4000); },
+  });
 
-  function notify(text: string, ok: boolean) {
-    setMsg(text);
-    setStatus(ok ? 'ok' : 'error');
-    setTimeout(() => { setMsg(''); setStatus('idle'); }, 4000);
-  }
+  const pullMutation = useMutation({
+    mutationFn: pullFromServer,
+    onSettled: () => { setTimeout(() => pullMutation.reset(), 4000); },
+  });
 
-  async function push() {
-    setStatus('pushing');
-    try {
-      const r = await pushToServer();
-      notify(`${r.synced.products} produits · ${r.synced.movements} mouvements · ${r.synced.bons} bons`, true);
-    } catch (e) {
-      notify(e instanceof Error ? e.message : String(e), false);
-    }
-  }
-
-  async function pull() {
+  function handlePull() {
     if (!confirm('Remplacer les données locales par celles du serveur ?')) return;
-    setStatus('pulling');
-    try {
-      const r = await pullFromServer();
-      notify(`${r.products} produits · ${r.movements} mouvements · ${r.bons} bons`, true);
-    } catch (e) {
-      notify(e instanceof Error ? e.message : String(e), false);
-    }
+    pullMutation.mutate();
   }
 
-  const busy = status === 'pushing' || status === 'pulling';
+  const busy = pushMutation.isPending || pullMutation.isPending;
+
+  const activeResult = pushMutation.isSuccess || pushMutation.isError
+    ? pushMutation
+    : pullMutation.isSuccess || pullMutation.isError
+      ? pullMutation
+      : null;
+
+  const successText = pushMutation.isSuccess
+    ? `${pushMutation.data.synced.products} produits · ${pushMutation.data.synced.movements} mouvements · ${pushMutation.data.synced.bons} bons`
+    : pullMutation.isSuccess
+      ? `${pullMutation.data.products} produits · ${pullMutation.data.movements} mouvements · ${pullMutation.data.bons} bons`
+      : '';
+
+  const errorText = pushMutation.error instanceof Error
+    ? pushMutation.error.message
+    : pullMutation.error instanceof Error
+      ? pullMutation.error.message
+      : '';
 
   return (
     <div className="mx-3 mb-3 rounded-xl overflow-hidden" style={{ background: '#1e293b' }}>
@@ -68,7 +65,7 @@ export default function SyncBar() {
           </span>
         </div>
         <button
-          onClick={check}
+          onClick={() => refetch()}
           disabled={checking}
           className="text-slate-600 hover:text-slate-400 transition-colors disabled:opacity-40"
           title="Vérifier la connexion"
@@ -80,46 +77,49 @@ export default function SyncBar() {
       {/* Boutons sync */}
       {online && (
         <div className="flex gap-1.5 px-3 pb-3">
-          <button
-            onClick={push}
+          <Button
+            onClick={() => pushMutation.mutate()}
             disabled={busy}
             title="Envoyer vers le serveur SQLite"
-            className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-opacity hover:opacity-80 disabled:opacity-40"
-            style={{ background: '#4f46e5', color: 'white' }}
+            size="sm"
+            className="flex-1 h-8 text-xs"
           >
-            {status === 'pushing'
+            {pushMutation.isPending
               ? <RefreshCw size={11} className="animate-spin" />
               : <Upload size={11} />
             }
             Envoyer
-          </button>
-          <button
-            onClick={pull}
+          </Button>
+          <Button
+            onClick={handlePull}
             disabled={busy}
             title="Recevoir depuis le serveur SQLite"
-            className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-opacity hover:opacity-80 disabled:opacity-40"
-            style={{ background: '#0f766e', color: 'white' }}
+            size="sm"
+            className="flex-1 h-8 text-xs bg-teal-700 hover:bg-teal-700 hover:opacity-90"
           >
-            {status === 'pulling'
+            {pullMutation.isPending
               ? <RefreshCw size={11} className="animate-spin" />
               : <Download size={11} />
             }
             Recevoir
-          </button>
+          </Button>
         </div>
       )}
 
       {/* Message résultat */}
-      {msg && (
+      {activeResult && (
         <div
           className="mx-3 mb-3 px-3 py-2 rounded-lg flex items-start gap-2 text-xs"
-          style={status === 'ok'
+          style={activeResult.isSuccess
             ? { background: '#064e3b', color: '#6ee7b7' }
             : { background: '#450a0a', color: '#fca5a5' }
           }
         >
-          {status === 'ok' ? <CheckCircle size={12} className="shrink-0 mt-0.5" /> : <AlertCircle size={12} className="shrink-0 mt-0.5" />}
-          <span>{msg}</span>
+          {activeResult.isSuccess
+            ? <CheckCircle size={12} className="shrink-0 mt-0.5" />
+            : <AlertCircle size={12} className="shrink-0 mt-0.5" />
+          }
+          <span>{activeResult.isSuccess ? successText : errorText}</span>
         </div>
       )}
     </div>
