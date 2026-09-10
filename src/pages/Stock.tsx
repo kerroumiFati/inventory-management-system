@@ -8,7 +8,6 @@ import {
 import { db, getProductByBarcode } from '../db';
 import { ArrowUpCircle, Check, BarChart2, ScanLine, Search, ArrowUpDown } from 'lucide-react';
 import BarcodeScanner from '../components/BarcodeScanner';
-import type { NavigateFn } from '../types';
 import type { Product } from '../../shared/schemas';
 import { sortableTableFeatures } from '@/lib/table';
 import { Button } from '@/components/ui/button';
@@ -17,10 +16,6 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
-
-interface StockProps {
-  navigate: NavigateFn;
-}
 
 interface StockRow extends Product {
   qty: number;
@@ -38,7 +33,7 @@ function fmt(val: number, unit: string | undefined) {
 
 const columnHelper = createColumnHelper<typeof sortableTableFeatures, StockRow>();
 
-export default function Stock({ navigate }: StockProps) {
+export default function Stock() {
   const [addModal, setAddModal] = useState<StockRow | null>(null);
   const [scanner,  setScanner]  = useState(false);
   const [search,   setSearch]   = useState('');

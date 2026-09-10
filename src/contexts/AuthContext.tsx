@@ -1,19 +1,5 @@
-import { createContext, useContext, useState, useCallback, type ReactNode } from 'react';
-
-export interface AuthUser {
-  username: string;
-  role: string;
-}
-
-interface AuthContextValue {
-  token: string | null;
-  user: AuthUser | null;
-  login: (tokenValue: string, userData: AuthUser) => void;
-  logout: () => void;
-  isAuthenticated: boolean;
-}
-
-const AuthContext = createContext<AuthContextValue | null>(null);
+import { useState, useCallback, type ReactNode } from 'react';
+import { AuthContext, type AuthUser } from './authContextValue';
 
 const TOKEN_KEY = 'stock_auth_token';
 const USER_KEY  = 'stock_auth_user';
@@ -46,10 +32,4 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       {children}
     </AuthContext.Provider>
   );
-}
-
-export function useAuth(): AuthContextValue {
-  const ctx = useContext(AuthContext);
-  if (!ctx) throw new Error('useAuth must be used within an AuthProvider');
-  return ctx;
 }

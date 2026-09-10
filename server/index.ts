@@ -1,12 +1,14 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
 import cors from 'cors';
-import Database from 'better-sqlite3';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { dirname, join } from 'path';
 import { randomBytes } from 'crypto';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { ZodError } from 'zod';
+import { eq, count } from 'drizzle-orm';
+import { createDb } from './db/client.ts';
+import { users, products, movements, bons, bonItems } from './db/schema.ts';
 import {
   LoginRequestSchema,
   ChangePasswordRequestSchema,
@@ -17,14 +19,6 @@ interface AuthTokenPayload {
   id: number;
   username: string;
   role: string;
-}
-
-interface UserRow {
-  id: number;
-  username: string;
-  password: string;
-  role: string;
-  created_at: string;
 }
 
 declare global {
@@ -44,10 +38,13 @@ try {
   // Pas de fichier .env — on continue avec les valeurs par défaut / générées ci-dessous.
 }
 
-const db = new Database(process.env.DB_PATH || join(__dirname, 'stock.db'));
+const connectionString = process.env.DATABASE_URL;
+if (!connectionString) {
+  console.error('  ✗ DATABASE_URL est requis (voir server/.env.example). Lancez `docker compose up -d` puis `npm run db:migrate`.');
+  process.exit(1);
+}
 
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+const { db, pool } = createDb(connectionString);
 
 const envJwtSecret = process.env.JWT_SECRET;
 const JWT_SECRET: string = envJwtSecret ?? randomBytes(32).toString('hex');
@@ -56,63 +53,9 @@ if (!envJwtSecret) {
   console.warn('  ! Les sessions existantes seront invalidées à chaque redémarrage tant que JWT_SECRET n\'est pas défini dans server/.env');
 }
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS products (
-    id         INTEGER PRIMARY KEY,
-    name       TEXT    NOT NULL,
-    reference  TEXT    DEFAULT '',
-    barcode    TEXT    DEFAULT '',
-    category   TEXT    DEFAULT '',
-    unit       TEXT    DEFAULT 'pièce',
-    minStock   REAL    DEFAULT 0,
-    stockInitial REAL  DEFAULT 0,
-    description TEXT   DEFAULT '',
-    updatedAt  TEXT    DEFAULT (datetime('now'))
-  );
-
-  CREATE TABLE IF NOT EXISTS movements (
-    id         INTEGER PRIMARY KEY,
-    productId  INTEGER NOT NULL,
-    type       TEXT    NOT NULL,
-    date       TEXT    NOT NULL,
-    quantity   REAL    NOT NULL,
-    bonNumber  TEXT    DEFAULT '',
-    note       TEXT    DEFAULT ''
-  );
-
-  CREATE TABLE IF NOT EXISTS bons (
-    id          INTEGER PRIMARY KEY,
-    number      TEXT NOT NULL,
-    date        TEXT NOT NULL,
-    type        TEXT DEFAULT 'sortie',
-    note        TEXT DEFAULT '',
-    destination TEXT DEFAULT '',
-    isFormal    INTEGER DEFAULT 0,
-    fileName    TEXT DEFAULT NULL,
-    fileType    TEXT DEFAULT NULL,
-    fileData    TEXT DEFAULT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS bon_items (
-    id        INTEGER PRIMARY KEY,
-    bonId     INTEGER NOT NULL,
-    productId INTEGER NOT NULL,
-    quantity  REAL    NOT NULL,
-    note      TEXT    DEFAULT ''
-  );
-
-  CREATE TABLE IF NOT EXISTS users (
-    id         INTEGER PRIMARY KEY,
-    username   TEXT NOT NULL UNIQUE,
-    password   TEXT NOT NULL,
-    role       TEXT NOT NULL DEFAULT 'user',
-    created_at TEXT DEFAULT (datetime('now'))
-  );
-`);
-
 // Créer le compte admin par défaut si aucun utilisateur n'existe
-const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get() as { count: number };
-if (userCount.count === 0) {
+const [{ value: userCount }] = await db.select({ value: count() }).from(users);
+if (userCount === 0) {
   const adminUsername = process.env.ADMIN_USERNAME || 'admin';
   let adminPassword = process.env.ADMIN_PASSWORD;
   if (!adminPassword) {
@@ -121,7 +64,7 @@ if (userCount.count === 0) {
     console.warn('  ! Notez-le maintenant, il ne sera plus jamais affiché. Définissez ADMIN_PASSWORD dans server/.env pour un mot de passe stable.');
   }
   const hash = bcrypt.hashSync(adminPassword, 10);
-  db.prepare("INSERT INTO users (username, password, role) VALUES (?, ?, 'admin')").run(adminUsername, hash);
+  await db.insert(users).values({ username: adminUsername, password: hash, role: 'admin' });
   console.log(`  ✓ Compte admin créé → ${adminUsername}`);
 }
 
@@ -152,7 +95,7 @@ function zodErrorMessage(err: ZodError): string {
 app.get('/api/status', (_req, res) => res.json({ ok: true }));
 
 // ── Auth : login ─────────────────────────────────────────────
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
   let body;
   try {
     body = LoginRequestSchema.parse(req.body);
@@ -161,7 +104,7 @@ app.post('/api/auth/login', (req, res) => {
   }
   const { username, password } = body;
 
-  const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username) as UserRow | undefined;
+  const [user] = await db.select().from(users).where(eq(users.username, username)).limit(1);
   if (!user || !bcrypt.compareSync(password, user.password)) {
     return res.status(401).json({ error: 'Identifiant ou mot de passe incorrect' });
   }
@@ -176,7 +119,7 @@ app.post('/api/auth/login', (req, res) => {
 });
 
 // ── Auth : changer mot de passe ──────────────────────────────
-app.post('/api/auth/change-password', requireAuth, (req, res) => {
+app.post('/api/auth/change-password', requireAuth, async (req, res) => {
   let body;
   try {
     body = ChangePasswordRequestSchema.parse(req.body);
@@ -185,84 +128,88 @@ app.post('/api/auth/change-password', requireAuth, (req, res) => {
   }
   const { currentPassword, newPassword } = body;
 
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user!.id) as UserRow;
-  if (!bcrypt.compareSync(currentPassword, user.password)) {
+  const [user] = await db.select().from(users).where(eq(users.id, req.user!.id)).limit(1);
+  if (!user || !bcrypt.compareSync(currentPassword, user.password)) {
     return res.status(401).json({ error: 'Mot de passe actuel incorrect' });
   }
 
   const hash = bcrypt.hashSync(newPassword, 10);
-  db.prepare('UPDATE users SET password = ? WHERE id = ?').run(hash, req.user!.id);
+  await db.update(users).set({ password: hash }).where(eq(users.id, req.user!.id));
   res.json({ ok: true });
 });
 
 // ── SYNC : le client envoie toutes ses données ──────────────
-app.post('/api/sync/push', requireAuth, (req, res) => {
+app.post('/api/sync/push', requireAuth, async (req, res) => {
   let body;
   try {
     body = SyncPushRequestSchema.parse(req.body);
   } catch (err) {
     return res.status(400).json({ error: err instanceof ZodError ? zodErrorMessage(err) : 'Payload invalide' });
   }
-  const { products, movements, bons, bonItems } = body;
+  const { products: productsPayload, movements: movementsPayload, bons: bonsPayload, bonItems: bonItemsPayload } = body;
 
-  const run = db.transaction(() => {
-    db.prepare('DELETE FROM bon_items').run();
-    db.prepare('DELETE FROM movements').run();
-    db.prepare('DELETE FROM bons').run();
-    db.prepare('DELETE FROM products').run();
+  await db.transaction(async tx => {
+    // Ordre FK-safe : enfants d'abord pour la suppression, parents d'abord pour l'insertion.
+    await tx.delete(bonItems);
+    await tx.delete(movements);
+    await tx.delete(bons);
+    await tx.delete(products);
 
-    const insProduct = db.prepare(`
-      INSERT INTO products (id,name,reference,barcode,category,unit,minStock,stockInitial,description,updatedAt)
-      VALUES (?,?,?,?,?,?,?,?,?,?)`);
-    for (const p of products) {
-      insProduct.run(p.id, p.name, p.reference || '', p.barcode || '', p.category || '',
-        p.unit || 'pièce', p.minStock || 0, p.stockInitial || 0, p.description || '', new Date().toISOString());
+    // Les id sont fournis explicitement par le client (généré par Dexie côté navigateur),
+    // comme c'était déjà le cas avec la clé auto-incrémentée SQLite.
+    if (productsPayload.length) {
+      await tx.insert(products).values(productsPayload.map(p => ({
+        id: p.id, name: p.name, reference: p.reference || '', barcode: p.barcode || '',
+        category: p.category || '', unit: p.unit || 'pièce', minStock: p.minStock || 0,
+        stockInitial: p.stockInitial || 0, description: p.description || '',
+        updatedAt: new Date().toISOString(),
+      })));
     }
-
-    const insMov = db.prepare(`
-      INSERT INTO movements (id,productId,type,date,quantity,bonNumber,note)
-      VALUES (?,?,?,?,?,?,?)`);
-    for (const m of movements) {
-      insMov.run(m.id, m.productId, m.type, m.date, m.quantity, m.bonNumber || '', m.note || '');
+    if (movementsPayload.length) {
+      await tx.insert(movements).values(movementsPayload.map(m => ({
+        id: m.id, productId: m.productId, type: m.type, date: m.date,
+        quantity: m.quantity, bonNumber: m.bonNumber || '', note: m.note || '',
+      })));
     }
-
-    const insBon = db.prepare(`
-      INSERT INTO bons (id,number,date,type,note,destination,isFormal,fileName,fileType,fileData)
-      VALUES (?,?,?,?,?,?,?,?,?,?)`);
-    for (const b of bons) {
-      insBon.run(b.id, b.number, b.date, b.type || 'sortie', b.note || '', b.destination || '',
-        b.isFormal ? 1 : 0, b.fileName || null, b.fileType || null, b.fileData || null);
+    if (bonsPayload.length) {
+      await tx.insert(bons).values(bonsPayload.map(b => ({
+        id: b.id, number: b.number, date: b.date, type: b.type || 'sortie',
+        note: b.note || '', destination: b.destination || '', isFormal: b.isFormal ?? false,
+        fileName: b.fileName || null, fileType: b.fileType || null, fileData: b.fileData || null,
+      })));
     }
-
-    const insItem = db.prepare(`
-      INSERT INTO bon_items (id,bonId,productId,quantity,note)
-      VALUES (?,?,?,?,?)`);
-    for (const i of bonItems) {
-      insItem.run(i.id, i.bonId, i.productId, i.quantity, i.note || '');
+    if (bonItemsPayload.length) {
+      await tx.insert(bonItems).values(bonItemsPayload.map(i => ({
+        id: i.id, bonId: i.bonId, productId: i.productId, quantity: i.quantity, note: i.note || '',
+      })));
     }
   });
 
-  run();
-  res.json({ ok: true, synced: { products: products.length, movements: movements.length, bons: bons.length } });
+  res.json({
+    ok: true,
+    synced: { products: productsPayload.length, movements: movementsPayload.length, bons: bonsPayload.length },
+  });
 });
 
 // ── SYNC : le client récupère toutes les données ────────────
-app.get('/api/sync/pull', requireAuth, (_req, res) => {
-  const products  = db.prepare('SELECT * FROM products').all();
-  const movements = db.prepare('SELECT * FROM movements').all();
-  const bons      = db.prepare('SELECT * FROM bons').all();
-  const bonItems  = db.prepare('SELECT * FROM bon_items').all();
-  res.json({ products, movements, bons, bonItems });
+app.get('/api/sync/pull', requireAuth, async (_req, res) => {
+  const [productsList, movementsList, bonsList, bonItemsList] = await Promise.all([
+    db.select().from(products),
+    db.select().from(movements),
+    db.select().from(bons),
+    db.select().from(bonItems),
+  ]);
+  res.json({ products: productsList, movements: movementsList, bons: bonsList, bonItems: bonItemsList });
 });
 
-export { app, db };
+export { app, pool };
 
 // Ne démarre le serveur que si ce fichier est exécuté directement
 // (pas lorsqu'il est importé, ex. depuis les tests).
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const PORT = process.env.PORT || 3001;
   app.listen(PORT, () => {
-    console.log(`\n  ✓ Serveur SQLite démarré → http://localhost:${PORT}`);
-    console.log(`  ✓ Base de données : ${db.name}\n`);
+    console.log(`\n  ✓ Serveur démarré → http://localhost:${PORT}`);
+    console.log(`  ✓ Base de données : PostgreSQL (${connectionString.replace(/:[^:@]+@/, ':****@')})\n`);
   });
 }

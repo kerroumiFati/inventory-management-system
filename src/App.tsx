@@ -8,7 +8,7 @@ import ImportExport from './pages/ImportExport';
 import Stock       from './pages/Stock';
 import Login       from './pages/Login';
 import SyncBar     from './components/SyncBar';
-import { useAuth } from './contexts/AuthContext';
+import { useAuth } from './contexts/useAuth';
 import type { NavigateFn, PageKey } from './types';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent } from '@/components/ui/sheet';
@@ -218,7 +218,7 @@ export default function App() {
         {/* Page */}
         <main className="flex-1 p-4 md:p-7">
           {page === 'dashboard'   && <Dashboard navigate={navigate} />}
-          {page === 'stock'       && <Stock navigate={navigate} />}
+          {page === 'stock'       && <Stock />}
           {page === 'products'    && <Products />}
           {page === 'movement'    && <NewMovement navigate={navigate} />}
           {page === 'bons'        && <Bons navigate={navigate} />}
