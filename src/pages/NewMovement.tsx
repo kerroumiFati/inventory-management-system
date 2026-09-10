@@ -5,6 +5,10 @@ import { Plus, Trash2, Check, ScanLine, Paperclip, X, FileText, Image, AlertTria
 import BarcodeScanner from '../components/BarcodeScanner';
 import type { NavigateFn } from '../types';
 import type { Product } from '../../shared/schemas';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Card } from '@/components/ui/card';
 
 interface MovementItem {
   productId: string;
@@ -236,28 +240,26 @@ export default function NewMovement({ navigate }: NewMovementProps) {
       </div>
 
       {/* Destination + Note */}
-      <div className="bg-white rounded-xl border border-slate-100 shadow-sm p-5 mb-4">
+      <Card className="shadow-sm p-5 mb-4">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label className="text-xs font-medium text-slate-500 uppercase tracking-wide block mb-1">Destination / Demandeur</label>
-            <input
+            <Label className="block mb-1">Destination / Demandeur</Label>
+            <Input
               value={destination}
               onChange={e => setDestination(e.target.value)}
               placeholder="Ex: Chantier A, Service maintenance..."
-              className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200"
             />
           </div>
           <div>
-            <label className="text-xs font-medium text-slate-500 uppercase tracking-wide block mb-1">Observations</label>
-            <input
+            <Label className="block mb-1">Observations</Label>
+            <Input
               value={note}
               onChange={e => setNote(e.target.value)}
               placeholder="Remarques..."
-              className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200"
             />
           </div>
         </div>
-      </div>
+      </Card>
 
       {/* Alerte stock insuffisant */}
       {stockIssues.length > 0 && (
@@ -276,15 +278,12 @@ export default function NewMovement({ navigate }: NewMovementProps) {
       )}
 
       {/* Lignes produits */}
-      <div className="bg-white rounded-xl border border-slate-100 shadow-sm p-5 mb-4">
+      <Card className="shadow-sm p-5 mb-4">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Produits sortis</h2>
-          <button
-            onClick={() => setScanningIdx(-1)}
-            className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-200 transition-colors"
-          >
+          <Button variant="outline" size="sm" className="text-xs" onClick={() => setScanningIdx(-1)}>
             <ScanLine size={14} /> Scanner
-          </button>
+          </Button>
         </div>
 
         <div className="space-y-3">
@@ -313,22 +312,22 @@ export default function NewMovement({ navigate }: NewMovementProps) {
                 <div className="col-span-5 md:col-span-3">
                   <label className="text-xs text-slate-400 block mb-1">Q. Sortie</label>
                   <div className="relative">
-                    <input
+                    <Input
                       type="number" min="0" step={step} value={item.quantity}
                       onChange={e => updateItem(idx, 'quantity', e.target.value)}
-                      className={`w-full px-2 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 bg-white ${unit ? 'pr-8' : ''}`}
+                      className={`bg-white ${unit ? 'pr-8' : ''}`}
                     />
-                    {unit && <span className="absolute right-2 top-2 text-xs text-slate-400">{unit}</span>}
+                    {unit && <span className="absolute right-2 top-2.5 text-xs text-slate-400">{unit}</span>}
                   </div>
                 </div>
 
                 <div className="col-span-6 md:col-span-3">
                   <label className="text-xs text-slate-400 block mb-1">Observations</label>
-                  <input
+                  <Input
                     value={item.note}
                     onChange={e => updateItem(idx, 'note', e.target.value)}
                     placeholder="Remarque..."
-                    className="w-full px-2 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 bg-white"
+                    className="bg-white"
                   />
                 </div>
 
@@ -344,13 +343,13 @@ export default function NewMovement({ navigate }: NewMovementProps) {
           })}
         </div>
 
-        <button onClick={addItem} className="mt-3 flex items-center gap-2 text-sm font-medium" style={{ color: '#4f46e5' }}>
+        <Button variant="link" onClick={addItem} className="mt-3 px-0 h-auto">
           <Plus size={15} /> Ajouter une ligne
-        </button>
-      </div>
+        </Button>
+      </Card>
 
       {/* Pièce jointe — optionnelle */}
-      <div className="bg-white rounded-xl border border-slate-100 shadow-sm p-5 mb-5">
+      <Card className="shadow-sm p-5 mb-5">
         <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">
           Pièce jointe <span className="normal-case font-normal text-slate-300 ml-1">— optionnel</span>
         </h2>
@@ -387,16 +386,11 @@ export default function NewMovement({ navigate }: NewMovementProps) {
           className="hidden"
           onChange={handleFile}
         />
-      </div>
+      </Card>
 
-      <button
-        onClick={submit}
-        disabled={saving}
-        className="w-full py-3 rounded-xl text-white font-semibold flex items-center justify-center gap-2 hover:opacity-90 transition-opacity disabled:opacity-50"
-        style={{ background: '#4f46e5' }}
-      >
+      <Button onClick={submit} disabled={saving} className="w-full py-3 h-auto text-sm font-semibold">
         {saving ? 'Enregistrement...' : <><Check size={17} /> Valider la sortie</>}
-      </button>
+      </Button>
     </div>
   );
 }

@@ -4,6 +4,8 @@ import { db } from '../db';
 import * as XLSX from 'xlsx';
 import { Upload, Download, FileSpreadsheet, Check, AlertCircle, Info } from 'lucide-react';
 import type { Product, Bon } from '../../shared/schemas';
+import { Button } from '@/components/ui/button';
+import { Card } from '@/components/ui/card';
 
 type ExcelRow = Record<string, string | number | undefined>;
 
@@ -217,7 +219,7 @@ export default function ImportExport() {
 
       {/* Aperçu avant import */}
       {preview && (
-        <div className="bg-white rounded-xl border border-indigo-200 shadow-sm p-5 mb-4">
+        <Card className="border-indigo-200 shadow-sm p-5 mb-4">
           <div className="flex items-start justify-between mb-3">
             <div>
               <h2 className="font-semibold text-slate-800 text-sm">Aperçu — {preview.fileName}</h2>
@@ -260,18 +262,14 @@ export default function ImportExport() {
             </table>
           </div>
 
-          <button
-            onClick={confirmImport}
-            className="w-full py-2.5 rounded-lg text-white text-sm font-medium hover:opacity-90 transition-opacity flex items-center justify-center gap-2"
-            style={{ background: '#4f46e5' }}
-          >
+          <Button onClick={confirmImport} className="w-full py-2.5 h-auto">
             <Check size={15} /> Confirmer l'import de {preview.rows.length} produits
-          </button>
-        </div>
+          </Button>
+        </Card>
       )}
 
       {/* Import */}
-      <div className="bg-white rounded-xl border border-slate-100 shadow-sm p-5 mb-4">
+      <Card className="shadow-sm p-5 mb-4">
         <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3 flex items-center gap-2">
           <Upload size={14} /> Importer depuis Excel
         </h2>
@@ -292,25 +290,18 @@ export default function ImportExport() {
         </div>
 
         <div className="flex flex-wrap gap-3">
-          <button
-            onClick={downloadTemplate}
-            className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm border border-slate-200 text-slate-600 hover:bg-slate-50 transition-colors"
-          >
+          <Button variant="outline" onClick={downloadTemplate}>
             <FileSpreadsheet size={15} /> Modèle PRESTINFO
-          </button>
-          <button
-            onClick={() => fileRef.current?.click()}
-            className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm text-white font-medium hover:opacity-90 transition-opacity"
-            style={{ background: '#4f46e5' }}
-          >
+          </Button>
+          <Button onClick={() => fileRef.current?.click()}>
             <Upload size={15} /> Choisir un fichier .xlsx
-          </button>
+          </Button>
           <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleFileSelect} />
         </div>
-      </div>
+      </Card>
 
       {/* Export */}
-      <div className="bg-white rounded-xl border border-slate-100 shadow-sm p-5">
+      <Card className="shadow-sm p-5">
         <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-4 flex items-center gap-2">
           <Download size={14} /> Exporter vers Excel
         </h2>
@@ -334,7 +325,7 @@ export default function ImportExport() {
             onClick={exportBons}
           />
         </div>
-      </div>
+      </Card>
     </div>
   );
 }

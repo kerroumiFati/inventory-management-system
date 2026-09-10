@@ -1,10 +1,22 @@
 import { useState, useMemo } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
+import {
+  createColumnHelper,
+  flexRender,
+  useTable,
+} from '@tanstack/react-table';
 import { db, getProductByBarcode } from '../db';
-import { ArrowUpCircle, Check, X, BarChart2, ScanLine, Search, AlertTriangle } from 'lucide-react';
+import { ArrowUpCircle, Check, BarChart2, ScanLine, Search, ArrowUpDown } from 'lucide-react';
 import BarcodeScanner from '../components/BarcodeScanner';
 import type { NavigateFn } from '../types';
 import type { Product } from '../../shared/schemas';
+import { sortableTableFeatures } from '@/lib/table';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Badge } from '@/components/ui/badge';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
 
 interface StockProps {
   navigate: NavigateFn;
@@ -23,6 +35,8 @@ function fmt(val: number, unit: string | undefined) {
   if (isMeter(unit)) return `${parseFloat(val.toFixed(3))} ${unit}`;
   return `${val} ${unit || ''}`.trim();
 }
+
+const columnHelper = createColumnHelper<typeof sortableTableFeatures, StockRow>();
 
 export default function Stock({ navigate }: StockProps) {
   const [addModal, setAddModal] = useState<StockRow | null>(null);
@@ -92,10 +106,105 @@ export default function Stock({ navigate }: StockProps) {
     { key: 'empty', label: 'Épuisé',       count: emptyCount, danger: true },
   ];
 
+  const columns = useMemo(() => columnHelper.columns([
+    columnHelper.accessor('name', {
+      header: 'Produit',
+      cell: ctx => {
+        const p = ctx.row.original;
+        const min = Number(p.minStock) || 0;
+        const isEmpty = p.qty <= 0;
+        const isLow = min > 0 && p.qty > 0 && p.qty <= min;
+        const max = Math.max(p.qty, min * 2, 1);
+        const pct = Math.min(100, Math.max(0, (p.qty / max) * 100));
+        const color = isEmpty ? '#dc2626' : isLow ? '#d97706' : '#10b981';
+        return (
+          <div className="min-w-0 pr-4">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-sm font-semibold text-slate-800">{p.name}</span>
+              {p.reference && <span className="text-xs font-mono text-slate-400">{p.reference}</span>}
+            </div>
+            <div className="mt-2 flex items-center gap-2">
+              <div className="flex-1 h-1.5 rounded-full overflow-hidden bg-slate-100">
+                <div className="h-full rounded-full transition-all" style={{ width: `${isEmpty ? 0 : pct}%`, background: color }} />
+              </div>
+              {p.qteUtilisee > 0 && (
+                <span className="text-[10px] text-slate-400 shrink-0">{fmt(p.qteUtilisee, p.unit)} utilisé</span>
+              )}
+            </div>
+          </div>
+        );
+      },
+    }),
+    columnHelper.accessor('category', {
+      header: 'Famille',
+      cell: ctx => ctx.getValue()
+        ? <div className="text-center"><Badge>{ctx.getValue()}</Badge></div>
+        : <div className="text-center text-xs text-slate-300">—</div>,
+    }),
+    columnHelper.accessor('qty', {
+      header: ({ column }) => (
+        <button className="flex items-center gap-1 mx-auto hover:text-slate-600" onClick={() => column.toggleSorting(column.getIsSorted() === 'asc')}>
+          Stock actuel <ArrowUpDown size={11} />
+        </button>
+      ),
+      cell: ctx => {
+        const p = ctx.row.original;
+        const min = Number(p.minStock) || 0;
+        const isEmpty = p.qty <= 0;
+        const isLow = min > 0 && p.qty > 0 && p.qty <= min;
+        const color = isEmpty ? '#dc2626' : isLow ? '#d97706' : '#10b981';
+        return <div className="text-center text-base font-bold" style={{ color }}>{fmt(p.qty, p.unit)}</div>;
+      },
+    }),
+    columnHelper.accessor('minStock', {
+      header: ({ column }) => (
+        <button className="flex items-center gap-1 mx-auto hover:text-slate-600" onClick={() => column.toggleSorting(column.getIsSorted() === 'asc')}>
+          Minimum <ArrowUpDown size={11} />
+        </button>
+      ),
+      cell: ctx => {
+        const p = ctx.row.original;
+        const min = Number(p.minStock) || 0;
+        return <div className="text-center text-sm text-slate-400">{min > 0 ? fmt(min, p.unit) : '—'}</div>;
+      },
+    }),
+    columnHelper.display({
+      id: 'actions',
+      cell: ctx => {
+        const p = ctx.row.original;
+        const min = Number(p.minStock) || 0;
+        const isEmpty = p.qty <= 0;
+        const isLow = min > 0 && p.qty > 0 && p.qty <= min;
+        const statusColor = isEmpty ? '#dc2626' : isLow ? '#d97706' : '#10b981';
+        const statusBg    = isEmpty ? '#fee2e2' : isLow ? '#fef3c7' : '#d1fae5';
+        const statusLabel = isEmpty ? 'Épuisé' : isLow ? 'Faible' : 'OK';
+        return (
+          <div className="flex items-center justify-end gap-2">
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wide" style={{ background: statusBg, color: statusColor }}>
+              {statusLabel}
+            </span>
+            <Button
+              onClick={() => setAddModal(p)}
+              size="sm"
+              className="h-7 px-2.5 text-xs bg-emerald-100 text-emerald-800 hover:bg-emerald-100 hover:opacity-80"
+            >
+              <ArrowUpCircle size={12} /> Entrée
+            </Button>
+          </div>
+        );
+      },
+    }),
+  ]), []);
+
+  const table = useTable({
+    features: sortableTableFeatures,
+    data: displayed,
+    columns,
+  });
+
   return (
     <div>
       {scanner  && <BarcodeScanner onScan={handleScan} onClose={() => setScanner(false)} />}
-      {addModal && <EntreeModal product={addModal} onSave={saveEntree} onClose={() => setAddModal(null)} />}
 
       {/* Header */}
       <div className="flex items-center justify-between mb-5">
@@ -103,23 +212,20 @@ export default function Stock({ navigate }: StockProps) {
           <h1 className="text-xl font-bold text-slate-900">Niveaux de stock</h1>
           <p className="text-sm text-slate-500 mt-0.5">{stockData?.length ?? 0} produit(s)</p>
         </div>
-        <button
-          onClick={() => setScanner(true)}
-          className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm border border-slate-200 bg-white text-slate-500 hover:text-indigo-600 hover:border-indigo-200 transition-colors"
-        >
+        <Button variant="outline" onClick={() => setScanner(true)}>
           <ScanLine size={16} /> Scanner
-        </button>
+        </Button>
       </div>
 
       {/* Barre de recherche + filtres */}
       <div className="flex flex-col sm:flex-row gap-3 mb-5">
         <div className="relative flex-1">
           <Search size={15} className="absolute left-3 top-2.5 text-slate-400" />
-          <input
+          <Input
             placeholder="Rechercher libellé, référence, famille..."
             value={search}
             onChange={e => setSearch(e.target.value)}
-            className="w-full pl-9 pr-4 py-2 rounded-lg border border-slate-200 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200"
+            className="pl-9"
           />
         </div>
         <div className="flex gap-1.5 p-1 rounded-xl border border-slate-100 bg-white">
@@ -149,111 +255,46 @@ export default function Stock({ navigate }: StockProps) {
       </div>
 
       {/* Liste */}
-      {!displayed.length ? (
-        <div className="bg-white rounded-xl p-12 text-center border border-slate-100">
-          <BarChart2 size={36} className="mx-auto mb-3 text-slate-200" />
-          <p className="text-slate-400 text-sm">
-            {stockData?.length === 0 ? 'Aucun produit. Ajoutez des articles d\'abord.' : 'Aucun résultat pour cette recherche.'}
-          </p>
-        </div>
-      ) : (
-        <div className="bg-white rounded-xl border border-slate-100 overflow-hidden">
-          {/* Table header */}
-          <div
-            className="grid px-5 py-2.5 text-[10px] font-semibold uppercase tracking-wider text-slate-400"
-            style={{ gridTemplateColumns: '1fr 120px 120px 100px 120px', background: '#f8fafc', borderBottom: '1px solid #f1f5f9' }}
-          >
-            <span>Produit</span>
-            <span className="text-center">Famille</span>
-            <span className="text-center">Stock actuel</span>
-            <span className="text-center">Minimum</span>
-            <span className="text-right">Action</span>
+      <div className="bg-white rounded-xl border border-slate-100 overflow-hidden">
+        {!displayed.length ? (
+          <div className="py-12 text-center">
+            <BarChart2 size={36} className="mx-auto mb-3 text-slate-200" />
+            <p className="text-slate-400 text-sm">
+              {stockData?.length === 0 ? 'Aucun produit. Ajoutez des articles d\'abord.' : 'Aucun résultat pour cette recherche.'}
+            </p>
           </div>
+        ) : (
+          <Table>
+            <TableHeader>
+              {table.getHeaderGroups().map(hg => (
+                <TableRow key={hg.id}>
+                  {hg.headers.map(header => (
+                    <TableHead key={header.id}>
+                      {header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}
+                    </TableHead>
+                  ))}
+                </TableRow>
+              ))}
+            </TableHeader>
+            <TableBody>
+              {table.getRowModel().rows.map(row => (
+                <TableRow key={row.id}>
+                  {row.getAllCells().map(cell => (
+                    <TableCell key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</TableCell>
+                  ))}
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </div>
 
-          <div className="divide-y divide-slate-50">
-            {displayed.map(p => {
-              const min   = Number(p.minStock) || 0;
-              const qty   = p.qty;
-              const isNeg = qty < 0;
-              const isLow = min > 0 && qty > 0 && qty <= min;
-              const isEmpty = qty <= 0;
-              const max   = Math.max(qty, min * 2, 1);
-              const pct   = Math.min(100, Math.max(0, (qty / max) * 100));
-              let statusColor  = '#10b981';
-              let statusBg     = '#d1fae5';
-              let statusLabel  = 'OK';
-              if (isEmpty)     { statusColor = '#dc2626'; statusBg = '#fee2e2'; statusLabel = 'Épuisé'; }
-              else if (isLow)  { statusColor = '#d97706'; statusBg = '#fef3c7'; statusLabel = 'Faible'; }
-
-              return (
-                <div key={p.id} className="grid items-center px-5 py-3.5 hover:bg-slate-50/50 transition-colors"
-                  style={{ gridTemplateColumns: '1fr 120px 120px 100px 120px' }}>
-
-                  {/* Produit */}
-                  <div className="min-w-0 pr-4">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-sm font-semibold text-slate-800">{p.name}</span>
-                      {p.reference && (
-                        <span className="text-xs font-mono text-slate-400">{p.reference}</span>
-                      )}
-                    </div>
-                    {/* Progress bar */}
-                    <div className="mt-2 flex items-center gap-2">
-                      <div className="flex-1 h-1.5 rounded-full overflow-hidden" style={{ background: '#f1f5f9' }}>
-                        <div
-                          className="h-full rounded-full transition-all"
-                          style={{ width: `${isEmpty ? 0 : pct}%`, background: statusColor }}
-                        />
-                      </div>
-                      {p.qteUtilisee > 0 && (
-                        <span className="text-[10px] text-slate-400 shrink-0">
-                          {fmt(p.qteUtilisee, p.unit)} utilisé
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Famille */}
-                  <div className="text-center">
-                    {p.category ? (
-                      <span className="text-xs px-2 py-1 rounded-full font-medium" style={{ background: '#eef2ff', color: '#4f46e5' }}>
-                        {p.category}
-                      </span>
-                    ) : <span className="text-xs text-slate-300">—</span>}
-                  </div>
-
-                  {/* Stock actuel */}
-                  <div className="text-center">
-                    <div className="text-base font-bold" style={{ color: statusColor }}>{fmt(qty, p.unit)}</div>
-                  </div>
-
-                  {/* Min */}
-                  <div className="text-center">
-                    <span className="text-sm text-slate-400">{min > 0 ? fmt(min, p.unit) : '—'}</span>
-                  </div>
-
-                  {/* Action */}
-                  <div className="flex items-center justify-end gap-2">
-                    <span
-                      className="text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wide"
-                      style={{ background: statusBg, color: statusColor }}
-                    >
-                      {statusLabel}
-                    </span>
-                    <button
-                      onClick={() => setAddModal(p)}
-                      className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg font-semibold transition-colors hover:opacity-90"
-                      style={{ background: '#d1fae5', color: '#065f46' }}
-                    >
-                      <ArrowUpCircle size={12} /> Entrée
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
+      {/* Modal entrée en stock */}
+      <Dialog open={!!addModal} onOpenChange={open => { if (!open) setAddModal(null); }}>
+        <DialogContent className="max-w-sm">
+          {addModal && <EntreeModal product={addModal} onSave={saveEntree} onClose={() => setAddModal(null)} />}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -270,65 +311,47 @@ function EntreeModal({ product, onSave, onClose }: EntreeModalProps) {
   const meter = isMeter(product.unit);
 
   return (
-    <div className="fixed inset-0 flex items-center justify-center z-50 p-4" style={{ background: 'rgba(0,0,0,0.5)' }}>
-      <div className="bg-white rounded-2xl w-full max-w-sm shadow-2xl overflow-hidden">
-        {/* Modal header */}
-        <div className="flex items-center justify-between px-6 py-4" style={{ borderBottom: '1px solid #f1f5f9' }}>
-          <div>
-            <h2 className="font-bold text-slate-800">Entrée en stock</h2>
-            <p className="text-xs text-slate-400 mt-0.5 truncate max-w-[220px]">{product.name}</p>
-          </div>
-          <button onClick={onClose} className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors">
-            <X size={18} />
-          </button>
-        </div>
+    <>
+      <DialogHeader>
+        <DialogTitle>Entrée en stock</DialogTitle>
+        <p className="text-xs text-slate-400 mt-0.5 truncate max-w-[220px]">{product.name}</p>
+      </DialogHeader>
 
-        <div className="px-6 py-5 space-y-4">
-          <div>
-            <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide block mb-1.5">
-              Quantité reçue {product.unit ? `(${product.unit})` : ''}
-            </label>
-            <input
-              type="number"
-              min="0"
-              step={meter ? '0.001' : '1'}
-              value={qty}
-              onChange={e => setQty(e.target.value)}
-              placeholder={meter ? 'Ex: 12.50' : 'Ex: 10'}
-              className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200"
-              autoFocus
-            />
-            {meter && <p className="text-xs mt-1.5" style={{ color: '#4f46e5' }}>Décimales autorisées (ex: 2.75)</p>}
-          </div>
-          <div>
-            <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide block mb-1.5">
-              Référence / Note
-            </label>
-            <input
-              value={note}
-              onChange={e => setNote(e.target.value)}
-              placeholder="Ex: Réception commande n°..."
-              className="w-full px-3 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200"
-            />
-          </div>
+      <div className="px-6 py-5 space-y-4">
+        <div>
+          <Label className="block mb-1.5">Quantité reçue {product.unit ? `(${product.unit})` : ''}</Label>
+          <Input
+            type="number"
+            min="0"
+            step={meter ? '0.001' : '1'}
+            value={qty}
+            onChange={e => setQty(e.target.value)}
+            placeholder={meter ? 'Ex: 12.50' : 'Ex: 10'}
+            autoFocus
+          />
+          {meter && <p className="text-xs mt-1.5 text-primary">Décimales autorisées (ex: 2.75)</p>}
         </div>
-
-        <div className="flex gap-3 px-6 pb-6">
-          <button
-            onClick={onClose}
-            className="flex-1 py-2.5 border border-slate-200 rounded-xl text-sm font-medium text-slate-600 hover:bg-slate-50 transition-colors"
-          >
-            Annuler
-          </button>
-          <button
-            onClick={() => Number(qty) > 0 && product.id != null && onSave(product.id, qty, note)}
-            className="flex-1 py-2.5 rounded-xl text-sm text-white font-semibold flex items-center justify-center gap-2 hover:opacity-90 transition-opacity"
-            style={{ background: '#059669' }}
-          >
-            <Check size={15} /> Valider l'entrée
-          </button>
+        <div>
+          <Label className="block mb-1.5">Référence / Note</Label>
+          <Input
+            value={note}
+            onChange={e => setNote(e.target.value)}
+            placeholder="Ex: Réception commande n°..."
+          />
         </div>
       </div>
-    </div>
+
+      <DialogFooter>
+        <Button variant="outline" className="flex-1" onClick={onClose}>
+          Annuler
+        </Button>
+        <Button
+          className="flex-1"
+          onClick={() => Number(qty) > 0 && product.id != null && onSave(product.id, qty, note)}
+        >
+          <Check size={15} /> Valider l'entrée
+        </Button>
+      </DialogFooter>
+    </>
   );
 }

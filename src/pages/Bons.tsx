@@ -4,6 +4,8 @@ import { FileText, ChevronRight, Search, Paperclip, Download, Trash2, Eye } from
 import { useState, type MouseEvent } from 'react';
 import type { NavigateFn } from '../types';
 import type { Bon } from '../../shared/schemas';
+import { Input } from '@/components/ui/input';
+import { Card } from '@/components/ui/card';
 
 interface BonsProps {
   navigate: NavigateFn;
@@ -58,27 +60,27 @@ export default function Bons({ navigate }: BonsProps) {
 
       <div className="relative mb-4">
         <Search size={15} className="absolute left-3 top-2.5 text-slate-400" />
-        <input
+        <Input
           placeholder="Rechercher par n° bon, destination, observation..."
           value={search}
           onChange={e => setSearch(e.target.value)}
-          className="w-full pl-9 pr-4 py-2 rounded-lg border border-slate-200 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200"
+          className="pl-9"
         />
       </div>
 
       <div className="space-y-2">
         {filtered?.length === 0 && (
-          <div className="bg-white rounded-xl p-10 text-center border border-slate-100">
+          <Card className="p-10 text-center">
             <FileText size={36} className="mx-auto mb-3 text-slate-200" />
             <p className="text-slate-400 text-sm">Aucun bon enregistré</p>
-          </div>
+          </Card>
         )}
 
         {filtered?.map(bon => (
-          <div
+          <Card
             key={bon.id}
             onClick={() => navigate('bon-detail', { bonId: bon.id })}
-            className="bg-white rounded-xl px-4 py-3.5 border border-slate-100 shadow-sm hover:shadow-md transition-shadow cursor-pointer"
+            className="px-4 py-3.5 shadow-sm hover:shadow-md transition-shadow cursor-pointer"
           >
             <div className="flex items-start justify-between gap-3">
               <div className="flex items-start gap-3 min-w-0 flex-1">
@@ -141,7 +143,7 @@ export default function Bons({ navigate }: BonsProps) {
                 <ChevronRight size={16} className="text-slate-300" />
               </div>
             </div>
-          </div>
+          </Card>
         ))}
       </div>
     </div>

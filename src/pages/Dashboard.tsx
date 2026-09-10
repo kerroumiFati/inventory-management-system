@@ -4,6 +4,8 @@ import { db } from '../db';
 import { Package, ArrowDownCircle, FileText, AlertTriangle, TrendingUp, ArrowUpRight, ArrowDownRight } from 'lucide-react';
 import type { NavigateFn } from '../types';
 import type { Product } from '../../shared/schemas';
+import { Card } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
 
 interface DashboardProps {
   navigate: NavigateFn;
@@ -93,7 +95,7 @@ export default function Dashboard({ navigate }: DashboardProps) {
         <div className="lg:col-span-1 space-y-3">
           {/* Stock faible */}
           {lowStock.length > 0 ? (
-            <div className="bg-white rounded-xl border overflow-hidden" style={{ borderColor: '#fcd34d' }}>
+            <Card className="overflow-hidden" style={{ borderColor: '#fcd34d' }}>
               <div className="px-5 py-3.5" style={{ background: '#fffbeb', borderBottom: '1px solid #fcd34d' }}>
                 <div className="flex items-center gap-2 text-sm font-semibold" style={{ color: '#92400e' }}>
                   <AlertTriangle size={14} />
@@ -130,19 +132,19 @@ export default function Dashboard({ navigate }: DashboardProps) {
                   Voir les niveaux de stock <ArrowUpRight size={12} />
                 </button>
               </div>
-            </div>
+            </Card>
           ) : (
-            <div className="bg-white rounded-xl border border-slate-100 p-5 text-center">
+            <Card className="p-5 text-center">
               <div className="w-10 h-10 rounded-xl flex items-center justify-center mx-auto mb-3" style={{ background: '#d1fae5' }}>
                 <TrendingUp size={18} style={{ color: '#059669' }} />
               </div>
               <p className="text-sm font-semibold text-slate-700">Stock en bonne santé</p>
               <p className="text-xs text-slate-400 mt-1">Aucun article en dessous du seuil</p>
-            </div>
+            </Card>
           )}
 
           {/* Accès rapide */}
-          <div className="bg-white rounded-xl border border-slate-100 p-5">
+          <Card className="p-5">
             <p className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Accès rapide</p>
             <div className="space-y-2">
               <QuickAction
@@ -170,11 +172,11 @@ export default function Dashboard({ navigate }: DashboardProps) {
                 onClick={() => navigate('import')}
               />
             </div>
-          </div>
+          </Card>
         </div>
 
         {/* Derniers mouvements */}
-        <div className="lg:col-span-2 bg-white rounded-xl border border-slate-100 overflow-hidden">
+        <Card className="lg:col-span-2 overflow-hidden">
           <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: '1px solid #f1f5f9' }}>
             <h2 className="font-semibold text-slate-800 text-sm">Derniers mouvements</h2>
             <button
@@ -227,15 +229,9 @@ export default function Dashboard({ navigate }: DashboardProps) {
                       </div>
                       <div className="text-xs font-mono text-slate-400 truncate">{m.bonNumber || '—'}</div>
                       <div className="flex justify-center">
-                        <span
-                          className="text-[10px] font-semibold px-2 py-0.5 rounded-full uppercase tracking-wide"
-                          style={isSortie
-                            ? { background: '#fee2e2', color: '#b91c1c' }
-                            : { background: '#d1fae5', color: '#065f46' }
-                          }
-                        >
+                        <Badge variant={isSortie ? 'destructive' : 'success'} className="text-[10px] uppercase tracking-wide">
                           {isSortie ? 'Sortie' : 'Entrée'}
-                        </span>
+                        </Badge>
                       </div>
                       <div
                         className="text-sm font-bold text-right"
@@ -250,7 +246,7 @@ export default function Dashboard({ navigate }: DashboardProps) {
               </div>
             </>
           )}
-        </div>
+        </Card>
       </div>
     </div>
   );
@@ -268,9 +264,12 @@ interface KpiCardProps {
 
 function KpiCard({ icon, label, value, sub, accentColor, alert, onClick }: KpiCardProps) {
   return (
-    <button
+    <Card
+      role="button"
+      tabIndex={0}
       onClick={onClick}
-      className="bg-white rounded-xl border border-slate-100 text-left w-full overflow-hidden hover:shadow-md transition-shadow"
+      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') onClick(); }}
+      className="text-left w-full overflow-hidden hover:shadow-md transition-shadow cursor-pointer"
     >
       <div style={{ height: 3, background: accentColor }} />
       <div className="p-5">
@@ -293,7 +292,7 @@ function KpiCard({ icon, label, value, sub, accentColor, alert, onClick }: KpiCa
           </div>
         </div>
       </div>
-    </button>
+    </Card>
   );
 }
 

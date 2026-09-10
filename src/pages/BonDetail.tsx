@@ -5,6 +5,8 @@ import { useReactToPrint } from 'react-to-print';
 import { Printer, ArrowLeft, Trash2, Download, Eye, FileText, Image } from 'lucide-react';
 import type { NavigateFn } from '../types';
 import type { Product } from '../../shared/schemas';
+import { Button } from '@/components/ui/button';
+import { Card } from '@/components/ui/card';
 
 interface BonDetailProps {
   bonId: number | null;
@@ -64,19 +66,12 @@ export default function BonDetail({ bonId, navigate }: BonDetailProps) {
           <ArrowLeft size={16} /> Retour aux bons
         </button>
         <div className="flex gap-2">
-          <button
-            onClick={deleteBon}
-            className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm border border-red-200 text-red-600 hover:bg-red-50 transition-colors"
-          >
+          <Button variant="outline" className="border-red-200 text-red-600 hover:bg-red-50 hover:text-red-600" onClick={deleteBon}>
             <Trash2 size={15} /> Supprimer
-          </button>
-          <button
-            onClick={() => handlePrint()}
-            className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm text-white font-medium hover:opacity-90 transition-opacity"
-            style={{ background: '#4f46e5' }}
-          >
+          </Button>
+          <Button onClick={() => handlePrint()}>
             <Printer size={15} /> Imprimer
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -162,7 +157,7 @@ export default function BonDetail({ bonId, navigate }: BonDetailProps) {
 
       {/* Pièce jointe (hors zone imprimable) */}
       {bon.fileData && (
-        <div className="mt-4 bg-white rounded-xl border border-slate-100 shadow-sm p-5 no-print">
+        <Card className="mt-4 shadow-sm p-5 no-print">
           <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Pièce jointe</h2>
           <div className="flex items-center justify-between px-3 py-2.5 rounded-lg border border-indigo-100" style={{ background: '#eef2ff' }}>
             <div className="flex items-center gap-2.5 min-w-0">
@@ -186,7 +181,7 @@ export default function BonDetail({ bonId, navigate }: BonDetailProps) {
               </button>
             </div>
           </div>
-        </div>
+        </Card>
       )}
     </div>
   );

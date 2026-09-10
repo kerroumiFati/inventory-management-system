@@ -2,6 +2,10 @@ import { useState, type FormEvent } from 'react';
 import { Package, Eye, EyeOff, LogIn } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { API_BASE as API } from '../config';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Card, CardContent } from '@/components/ui/card';
 
 export default function Login() {
   const { login } = useAuth();
@@ -51,43 +55,40 @@ export default function Login() {
         </div>
 
         {/* Carte login */}
-        <div className="bg-white rounded-2xl shadow-2xl overflow-hidden">
+        <Card className="shadow-2xl overflow-hidden rounded-2xl">
           {/* Bandeau top */}
           <div className="h-1" style={{ background: 'linear-gradient(90deg, #4f46e5, #7c3aed)' }} />
 
-          <div className="px-8 py-8">
+          <CardContent className="px-8 py-8">
             <h2 className="text-lg font-bold text-slate-900 mb-1">Connexion</h2>
             <p className="text-sm text-slate-400 mb-6">Accès réservé aux utilisateurs autorisés</p>
 
             <form onSubmit={handleSubmit} className="space-y-4">
               <div>
-                <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide block mb-1.5">
-                  Identifiant
-                </label>
-                <input
+                <Label htmlFor="username" className="block mb-1.5">Identifiant</Label>
+                <Input
+                  id="username"
                   type="text"
                   autoComplete="username"
                   value={username}
                   onChange={e => setUsername(e.target.value)}
                   required
                   placeholder="admin"
-                  className="w-full px-4 py-2.5 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 transition"
                 />
               </div>
 
               <div>
-                <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide block mb-1.5">
-                  Mot de passe
-                </label>
+                <Label htmlFor="password" className="block mb-1.5">Mot de passe</Label>
                 <div className="relative">
-                  <input
+                  <Input
+                    id="password"
                     type={showPwd ? 'text' : 'password'}
                     autoComplete="current-password"
                     value={password}
                     onChange={e => setPassword(e.target.value)}
                     required
                     placeholder="••••••••"
-                    className="w-full px-4 py-2.5 pr-11 rounded-xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 transition"
+                    className="pr-11"
                   />
                   <button
                     type="button"
@@ -106,10 +107,10 @@ export default function Login() {
                 </div>
               )}
 
-              <button
+              <Button
                 type="submit"
                 disabled={loading}
-                className="w-full flex items-center justify-center gap-2 py-3 rounded-xl text-white text-sm font-bold tracking-wide transition-all hover:opacity-90 disabled:opacity-60 mt-2"
+                className="w-full py-3 h-auto text-sm font-bold tracking-wide mt-2"
                 style={{ background: 'linear-gradient(135deg, #4f46e5, #7c3aed)' }}
               >
                 {loading ? (
@@ -118,10 +119,10 @@ export default function Login() {
                   <LogIn size={16} />
                 )}
                 {loading ? 'Connexion...' : 'Se connecter'}
-              </button>
+              </Button>
             </form>
-          </div>
-        </div>
+          </CardContent>
+        </Card>
 
         <p className="text-center text-xs text-slate-600 mt-6">
           Application de gestion de stock — mode hors-ligne disponible
