@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { Package, Eye, EyeOff, LogIn } from 'lucide-react';
-import { useAuth } from '../contexts/AuthContext';
+import { useAuth } from '../contexts/useAuth';
 import { API_BASE as API } from '../config';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
