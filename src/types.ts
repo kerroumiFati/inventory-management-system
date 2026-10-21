@@ -3,8 +3,14 @@ export type PageKey =
   | 'stock'
   | 'products'
   | 'movement'
+  | 'entree'
+  | 'commande'
+  | 'reappro'
+  | 'inventaire'
+  | 'rapports'
   | 'bons'
   | 'bon-detail'
-  | 'import';
+  | 'import'
+  | 'users';
 
 export type NavigateFn = (page: PageKey, extra?: { bonId?: number }) => void;

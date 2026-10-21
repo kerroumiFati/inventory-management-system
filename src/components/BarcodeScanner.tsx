@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { BrowserMultiFormatReader, type IScannerControls } from '@zxing/browser';
+// @zxing est chargé à l'ouverture du scanner seulement (bibliothèque volumineuse).
+import type { IScannerControls } from '@zxing/browser';
 import { X, ScanLine, CameraOff } from 'lucide-react';
 
 interface BarcodeScannerProps {
@@ -15,10 +16,14 @@ export default function BarcodeScanner({ onScan, onClose }: BarcodeScannerProps)
 
   useEffect(() => {
     let mounted = true;
-    const reader = new BrowserMultiFormatReader();
+    let releaseStreams: (() => void) | null = null;
 
     async function start() {
       try {
+        const { BrowserMultiFormatReader } = await import('@zxing/browser');
+        releaseStreams = () => BrowserMultiFormatReader.releaseAllStreams();
+        if (!mounted) return;
+        const reader = new BrowserMultiFormatReader();
         const controls = await reader.decodeFromVideoDevice(
           undefined,
           videoRef.current ?? undefined,
@@ -45,7 +50,7 @@ export default function BarcodeScanner({ onScan, onClose }: BarcodeScannerProps)
     return () => {
       mounted = false;
       try { controlsRef.current?.stop(); } catch { /* ignore */ }
-      BrowserMultiFormatReader.releaseAllStreams();
+      releaseStreams?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- comportement existant : ne pas relancer le scan si onScan change de référence
   }, []);
@@ -58,7 +63,7 @@ export default function BarcodeScanner({ onScan, onClose }: BarcodeScannerProps)
             <ScanLine size={18} style={{ color: '#6366f1' }} />
             <span className="font-semibold text-slate-800 text-sm">Scanner un code-barres</span>
           </div>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-600">
+          <button onClick={onClose} aria-label="Fermer le scanner" className="text-slate-400 hover:text-slate-600">
             <X size={20} />
           </button>
         </div>

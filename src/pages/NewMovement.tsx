@@ -1,23 +1,20 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { db, getProductByBarcode, getNextBonNumber, checkStockDisponible, bufferToBase64, type StockIssue } from '../db';
+import { db, getProductByBarcode, checkStockDisponible, createBon, bufferToBase64, type StockIssue } from '../db';
+import { computeStockLevels, formatQty, quantityStep, type StockLevel } from '@/lib/stock';
 import { Plus, Trash2, Check, ScanLine, Paperclip, X, FileText, Image, AlertTriangle, ChevronDown } from 'lucide-react';
 import BarcodeScanner from '../components/BarcodeScanner';
 import type { NavigateFn } from '../types';
-import type { Product } from '../../shared/schemas';
+import { loadDraft, saveDraft, clearDraft, isDraftEmpty, type DraftKind, type DraftItem } from '@/lib/drafts';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card } from '@/components/ui/card';
 
-interface MovementItem {
-  productId: string;
-  quantity: string | number;
-  note: string;
-}
+type MovementItem = DraftItem;
 
 interface ProductSearchProps {
-  products: Product[] | undefined;
+  products: StockLevel[] | undefined;
   value: string;
   onChange: (value: string) => void;
 }
@@ -41,11 +38,12 @@ function ProductSearch({ products, value, onChange }: ProductSearchProps) {
     return (
       p.name.toLowerCase().includes(q) ||
       (p.reference || '').toLowerCase().includes(q) ||
+      (p.barcode   || '').toLowerCase().includes(q) ||
       (p.category  || '').toLowerCase().includes(q)
     );
   }).slice(0, 50);
 
-  function select(p: Product) {
+  function select(p: StockLevel) {
     onChange(String(p.id));
     setQuery('');
     setOpen(false);
@@ -104,7 +102,12 @@ function ProductSearch({ products, value, onChange }: ProductSearchProps) {
                   {p.reference && <span className="text-xs font-mono text-slate-400 mr-1">[{p.reference}]</span>}
                   {p.name}
                 </span>
-                {p.category && <span className="text-xs text-slate-300 shrink-0">{p.category}</span>}
+                <span
+                  className={`text-xs shrink-0 ${p.status === 'empty' ? 'text-red-500' : p.status === 'low' ? 'text-amber-600' : 'text-slate-400'}`}
+                  title="Stock disponible"
+                >
+                  {formatQty(p.qty, p.unit)}
+                </span>
               </div>
             ))}
           </div>
@@ -116,7 +119,32 @@ function ProductSearch({ products, value, onChange }: ProductSearchProps) {
 
 interface NewMovementProps {
   navigate: NavigateFn;
+  kind: DraftKind;
 }
+
+const TEXTS: Record<DraftKind, {
+  title: string; subtitle: string; partyLabel: string; partyPlaceholder: string; itemsTitle: string; qtyLabel: string; submit: string;
+}> = {
+  sortie: {
+    title: 'Sortie de stock', subtitle: 'Enregistrez les produits sortis',
+    partyLabel: 'Destination / Demandeur', partyPlaceholder: 'Ex: Chantier A, Service maintenance...',
+    itemsTitle: 'Produits sortis', qtyLabel: 'Q. Sortie', submit: 'Valider la sortie',
+  },
+  entree: {
+    title: 'Entrée de stock', subtitle: 'Enregistrez une réception (livraison, retour...) en une seule fois',
+    partyLabel: 'Fournisseur / Provenance', partyPlaceholder: 'Ex: Fournisseur X, BL n°...',
+    itemsTitle: 'Produits reçus', qtyLabel: 'Q. Reçue', submit: 'Valider la réception',
+  },
+  commande: {
+    title: 'Bon de commande', subtitle: "Commande fournisseur — le stock ne change qu'à la réception",
+    partyLabel: 'Fournisseur', partyPlaceholder: 'Ex: Fournisseur X',
+    itemsTitle: 'Produits commandés', qtyLabel: 'Q. Commandée', submit: 'Enregistrer la commande',
+  },
+};
+
+const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+
+const emptyItem = (): MovementItem => ({ productId: '', quantity: 1, note: '' });
 
 interface AttachedFile {
   name: string;
@@ -124,19 +152,48 @@ interface AttachedFile {
   data: ArrayBuffer;
 }
 
-export default function NewMovement({ navigate }: NewMovementProps) {
-  const products = useLiveQuery(() => db.products.toArray(), []);
-  const [items, setItems] = useState<MovementItem[]>([{ productId: '', quantity: 1, note: '' }]);
-  const [destination, setDestination] = useState('');
-  const [note, setNote] = useState('');
+export default function NewMovement({ navigate, kind }: NewMovementProps) {
+  const t = TEXTS[kind];
+  const [initialDraft] = useState(() => loadDraft(kind));
+  const rawProducts = useLiveQuery(() => db.products.toArray(), []);
+  const movements   = useLiveQuery(() => db.movements.toArray(), []);
+  const products = useMemo(
+    () => rawProducts && movements ? computeStockLevels(rawProducts, movements) : undefined,
+    [rawProducts, movements]
+  );
+  const [items, setItems] = useState<MovementItem[]>(() => initialDraft?.items ?? [emptyItem()]);
+  const [destination, setDestination] = useState(initialDraft?.destination ?? '');
+  const [note, setNote] = useState(initialDraft?.note ?? '');
+  const [draftRestored, setDraftRestored] = useState(() => !!initialDraft && !isDraftEmpty(initialDraft) && !initialDraft.orderUid);
+  const prepared = initialDraft?.preparedBy === 'reappro';
+  // Réception d'une commande (préparée depuis la commande).
+  const [order, setOrder] = useState(() => initialDraft?.orderUid
+    ? { uid: initialDraft.orderUid, number: initialDraft.orderNumber ?? '' }
+    : null);
   const [file, setFile] = useState<AttachedFile | null>(null);
   const [saving, setSaving] = useState(false);
   const [scanningIdx, setScanningIdx] = useState<number | null>(null);
   const [stockIssues, setStockIssues] = useState<StockIssue[]>([]);
+  const [error, setError] = useState('');
   const fileRef = useRef<HTMLInputElement>(null);
 
+  useEffect(() => {
+    saveDraft(kind, { items, destination, note, orderUid: order?.uid ?? null, orderNumber: order?.number });
+  }, [items, destination, note, kind, order]);
+
+  function clearForm() {
+    setItems([emptyItem()]);
+    setDestination('');
+    setNote('');
+    setFile(null);
+    setStockIssues([]);
+    setError('');
+    setDraftRestored(false);
+    setOrder(null);
+  }
+
   function addItem() {
-    setItems(i => [...i, { productId: '', quantity: 1, note: '' }]);
+    setItems(i => [...i, emptyItem()]);
   }
   function removeItem(idx: number) {
     setItems(i => i.filter((_, j) => j !== idx));
@@ -144,86 +201,89 @@ export default function NewMovement({ navigate }: NewMovementProps) {
   }
   function updateItem(idx: number, field: keyof MovementItem, val: string) {
     setItems(i => i.map((item, j) => j === idx ? { ...item, [field]: val } : item));
+    // Commande : le fournisseur habituel du premier produit choisi pré-remplit le champ.
+    if (kind === 'commande' && field === 'productId' && !destination.trim()) {
+      const supplier = findProduct(val)?.supplier;
+      if (supplier) setDestination(supplier);
+    }
     setStockIssues([]);
+    setError('');
   }
 
+  // Scan : si le produit est déjà dans la liste, on incrémente sa quantité ;
+  // sinon on remplit la ligne ciblée (ou la première ligne vide, ou une nouvelle ligne).
   async function handleScan(code: string) {
+    const targetIdx = scanningIdx;
     setScanningIdx(null);
     const found = await getProductByBarcode(code);
-    if (found) {
-      const emptyIdx = items.findIndex(i => !i.productId);
-      if (emptyIdx >= 0) updateItem(emptyIdx, 'productId', String(found.id));
-      else setItems(prev => [...prev, { productId: String(found.id), quantity: 1, note: '' }]);
-    } else {
-      alert(`Produit introuvable pour le code : ${code}`);
+    if (!found) {
+      setError(`Aucun produit avec le code-barres « ${code} ». Ajoutez-le d'abord dans Produits.`);
+      return;
     }
+    const pid = String(found.id);
+    setError('');
+    setStockIssues([]);
+    setItems(prev => {
+      const existing = prev.findIndex(i => i.productId === pid);
+      if (existing >= 0) {
+        return prev.map((item, j) => j === existing ? { ...item, quantity: (Number(item.quantity) || 0) + 1 } : item);
+      }
+      const idx = targetIdx != null && targetIdx >= 0 ? targetIdx : prev.findIndex(i => !i.productId);
+      if (idx >= 0) return prev.map((item, j) => j === idx ? { ...item, productId: pid } : item);
+      return [...prev, { ...emptyItem(), productId: pid }];
+    });
   }
 
   async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
     if (!f) return;
+    e.target.value = '';
+    // La pièce jointe est stockée dans le bon et synchronisée avec lui : on évite les fichiers énormes.
+    if (f.size > MAX_ATTACHMENT_BYTES) {
+      setError(`Fichier trop volumineux (${(f.size / 1048576).toFixed(1)} Mo). Maximum : ${MAX_ATTACHMENT_BYTES / 1048576} Mo — réduisez la photo ou scannez en qualité moindre.`);
+      return;
+    }
     const data = await f.arrayBuffer();
     setFile({ name: f.name, type: f.type, data });
-    e.target.value = '';
   }
 
-  function getStep(productId: string) {
-    const p = products?.find(p => p.id === Number(productId));
-    return p?.unit && ['m', 'm²', 'm³', 'mètre linéaire'].includes(p.unit) ? '0.001' : '1';
-  }
-  function getUnit(productId: string) {
-    return products?.find(p => p.id === Number(productId))?.unit || '';
+  function findProduct(productId: string) {
+    return products?.find(p => p.id === Number(productId));
   }
 
   async function submit() {
     const valid = items.filter(i => i.productId && Number(i.quantity) > 0);
-    if (valid.length === 0) return alert('Ajoutez au moins un produit.');
-
-    // Vérification stock disponible
-    const issues = await checkStockDisponible(valid);
-    if (issues.length > 0) {
-      setStockIssues(issues);
+    if (valid.length === 0) {
+      setError('Ajoutez au moins un produit avec une quantité supérieure à 0.');
       return;
     }
 
-    setSaving(true);
-    const date = new Date().toISOString();
-    const number = await getNextBonNumber();
-
-    // Convertir le fichier en base64 pour le stockage JSON
-    const fileData = file?.data ? bufferToBase64(file.data) : null;
-
-    const bonId = await db.bons.add({
-      number,
-      date,
-      type: 'sortie',
-      destination,
-      note,
-      isFormal: false,
-      fileName: file?.name || null,
-      fileType: file?.type || null,
-      fileData,
-    }) as number; // l'id auto-incrémenté est toujours défini une fois l'ajout terminé
-
-    for (const item of valid) {
-      await db.bonItems.add({
-        bonId,
-        productId: Number(item.productId),
-        quantity: Number(item.quantity),
-        note: item.note || '',
-      });
-      await db.movements.add({
-        productId: Number(item.productId),
-        type: 'sortie',
-        date,
-        quantity: Number(item.quantity),
-        bonNumber: number,
-        note: item.note || '',
-      });
+    // Vérification stock disponible (une réception ne peut pas manquer de stock)
+    if (kind === 'sortie') {
+      const issues = await checkStockDisponible(valid);
+      if (issues.length > 0) {
+        setStockIssues(issues);
+        return;
+      }
     }
 
-    setSaving(false);
-    navigate('bon-detail', { bonId });
+    setSaving(true);
+    try {
+      const bonId = await createBon({
+        type: kind,
+        destination: destination.trim(),
+        note: note.trim(),
+        items: valid.map(i => ({ productId: Number(i.productId), quantity: Number(i.quantity), note: i.note.trim() })),
+        // Fichier converti en base64 pour le stockage JSON
+        file: file ? { name: file.name, type: file.type, data: bufferToBase64(file.data) } : null,
+        orderUid: order?.uid ?? null,
+      });
+      clearDraft(kind);
+      navigate('bon-detail', { bonId });
+    } catch (err) {
+      setError(`Enregistrement impossible : ${err instanceof Error ? err.message : String(err)}`);
+      setSaving(false);
+    }
   }
 
   const fileIcon = file?.type?.startsWith('image/') ? <Image size={15} /> : <FileText size={15} />;
@@ -235,19 +295,36 @@ export default function NewMovement({ navigate }: NewMovementProps) {
       )}
 
       <div className="mb-5">
-        <h1 className="text-xl font-bold text-slate-900">Sortie de stock</h1>
-        <p className="text-sm text-slate-500 mt-0.5">Enregistrez les produits sortis</p>
+        <h1 className="text-xl font-bold text-slate-900">{t.title}</h1>
+        <p className="text-sm text-slate-500 mt-0.5">{t.subtitle}</p>
       </div>
+
+      {draftRestored && (
+        <div className="mb-4 flex items-center justify-between gap-3 text-sm text-indigo-800 bg-indigo-50 border border-indigo-100 rounded-xl px-4 py-3">
+          <span>{prepared ? 'Commande préparée depuis le réapprovisionnement : vérifiez les quantités puis enregistrez.' : 'Saisie en cours restaurée.'}</span>
+          <span className="flex gap-3 shrink-0">
+            <button onClick={() => setDraftRestored(false)} className="underline hover:text-indigo-950">Continuer</button>
+            <button onClick={clearForm} className="underline hover:text-indigo-950">Tout effacer</button>
+          </span>
+        </div>
+      )}
+
+      {order && (
+        <div className="mb-4 flex items-center justify-between gap-3 text-sm text-sky-800 bg-sky-50 border border-sky-100 rounded-xl px-4 py-3">
+          <span>Réception de la commande <span className="font-semibold">{order.number}</span> — quantités restant à recevoir pré-remplies, ajustez-les si la livraison est partielle.</span>
+          <button onClick={() => setOrder(null)} className="underline hover:text-sky-950 shrink-0">Détacher</button>
+        </div>
+      )}
 
       {/* Destination + Note */}
       <Card className="shadow-sm p-5 mb-4">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <Label className="block mb-1">Destination / Demandeur</Label>
+            <Label className="block mb-1">{t.partyLabel}</Label>
             <Input
               value={destination}
               onChange={e => setDestination(e.target.value)}
-              placeholder="Ex: Chantier A, Service maintenance..."
+              placeholder={t.partyPlaceholder}
             />
           </div>
           <div>
@@ -261,6 +338,12 @@ export default function NewMovement({ navigate }: NewMovementProps) {
         </div>
       </Card>
 
+      {error && (
+        <div className="mb-4 flex items-start gap-2 p-4 rounded-xl border border-red-200 bg-red-50 text-sm text-red-700">
+          <AlertTriangle size={16} className="shrink-0 mt-0.5" /> {error}
+        </div>
+      )}
+
       {/* Alerte stock insuffisant */}
       {stockIssues.length > 0 && (
         <div className="mb-4 p-4 rounded-xl border border-red-200 bg-red-50">
@@ -270,7 +353,7 @@ export default function NewMovement({ navigate }: NewMovementProps) {
           <ul className="space-y-1">
             {stockIssues.map((issue, i) => (
               <li key={i} className="text-xs text-red-600">
-                <span className="font-medium">{issue.name}</span> : demandé {issue.requested} {issue.unit}, disponible {issue.available} {issue.unit}
+                <span className="font-medium">{issue.name}</span> : demandé {formatQty(issue.requested, issue.unit)}, disponible {formatQty(issue.available, issue.unit)}
               </li>
             ))}
           </ul>
@@ -280,7 +363,7 @@ export default function NewMovement({ navigate }: NewMovementProps) {
       {/* Lignes produits */}
       <Card className="shadow-sm p-5 mb-4">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Produits sortis</h2>
+          <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">{t.itemsTitle}</h2>
           <Button variant="outline" size="sm" className="text-xs" onClick={() => setScanningIdx(-1)}>
             <ScanLine size={14} /> Scanner
           </Button>
@@ -288,8 +371,11 @@ export default function NewMovement({ navigate }: NewMovementProps) {
 
         <div className="space-y-3">
           {items.map((item, idx) => {
-            const unit = getUnit(item.productId);
-            const step = getStep(item.productId);
+            const product = findProduct(item.productId);
+            const unit = product?.unit || '';
+            const step = quantityStep(unit);
+            const delta     = (Number(item.quantity) || 0) * (kind === 'sortie' ? -1 : 1);
+            const remaining = product ? product.qty + delta : null;
             return (
               <div key={idx} className="grid grid-cols-12 gap-2 items-end p-3 rounded-lg" style={{ background: '#f8fafc' }}>
                 <div className="col-span-12 md:col-span-5">
@@ -302,6 +388,8 @@ export default function NewMovement({ navigate }: NewMovementProps) {
                     />
                     <button
                       onClick={() => setScanningIdx(idx)}
+                      title="Scanner le code-barres pour cette ligne"
+                      aria-label="Scanner le code-barres pour cette ligne"
                       className="px-2 py-2 rounded-lg border border-slate-200 bg-white text-slate-400 hover:text-indigo-600 hover:border-indigo-200 transition-colors"
                     >
                       <ScanLine size={15} />
@@ -310,7 +398,7 @@ export default function NewMovement({ navigate }: NewMovementProps) {
                 </div>
 
                 <div className="col-span-5 md:col-span-3">
-                  <label className="text-xs text-slate-400 block mb-1">Q. Sortie</label>
+                  <label className="text-xs text-slate-400 block mb-1">{t.qtyLabel}</label>
                   <div className="relative">
                     <Input
                       type="number" min="0" step={step} value={item.quantity}
@@ -319,6 +407,22 @@ export default function NewMovement({ navigate }: NewMovementProps) {
                     />
                     {unit && <span className="absolute right-2 top-2.5 text-xs text-slate-400">{unit}</span>}
                   </div>
+                  {product && kind === 'sortie' && (
+                    <p className={`text-[11px] mt-1 ${remaining != null && remaining < 0 ? 'text-red-600 font-medium' : 'text-slate-400'}`}>
+                      Dispo : {formatQty(product.qty, unit)}
+                      {remaining != null && remaining < 0 && ' — insuffisant'}
+                    </p>
+                  )}
+                  {product && kind === 'commande' && (
+                    <p className="text-[11px] mt-1 text-slate-400">
+                      Stock : {formatQty(product.qty, unit)}{Number(product.minStock) > 0 && ` · min ${formatQty(Number(product.minStock), unit)}`}
+                    </p>
+                  )}
+                  {product && kind === 'entree' && remaining != null && (
+                    <p className="text-[11px] mt-1 text-slate-400">
+                      Stock : {formatQty(product.qty, unit)} → <span className="font-medium text-emerald-700">{formatQty(remaining, unit)}</span>
+                    </p>
+                  )}
                 </div>
 
                 <div className="col-span-6 md:col-span-3">
@@ -333,7 +437,7 @@ export default function NewMovement({ navigate }: NewMovementProps) {
 
                 <div className="col-span-1 flex justify-end items-end pb-0.5">
                   {items.length > 1 && (
-                    <button onClick={() => removeItem(idx)} className="p-1.5 rounded text-slate-300 hover:text-red-500 hover:bg-red-50 transition-colors">
+                    <button onClick={() => removeItem(idx)} title="Retirer la ligne" aria-label="Retirer la ligne" className="p-1.5 rounded text-slate-300 hover:text-red-500 hover:bg-red-50 transition-colors">
                       <Trash2 size={14} />
                     </button>
                   )}
@@ -389,7 +493,7 @@ export default function NewMovement({ navigate }: NewMovementProps) {
       </Card>
 
       <Button onClick={submit} disabled={saving} className="w-full py-3 h-auto text-sm font-semibold">
-        {saving ? 'Enregistrement...' : <><Check size={17} /> Valider la sortie</>}
+        {saving ? 'Enregistrement...' : <><Check size={17} /> {t.submit}</>}
       </Button>
     </div>
   );

@@ -6,8 +6,11 @@ import {
   useTable,
 } from '@tanstack/react-table';
 import { sortableTableFeatures } from '@/lib/table';
-import { db } from '../db';
-import { Plus, Pencil, Trash2, Package, Search, ScanLine, ArrowUpDown } from 'lucide-react';
+import { db, countProductUsage, deleteProduct } from '../db';
+import ProductHistoryDialog from '../components/ProductHistoryDialog';
+import type { NavigateFn } from '../types';
+import { computeStockLevels, formatMoney, formatQty, isMeterUnit as isMeter, quantityStep, type StockStatus } from '@/lib/stock';
+import { Plus, Pencil, Trash2, Package, Search, ScanLine, ArrowUpDown, History } from 'lucide-react';
 import BarcodeScanner from '../components/BarcodeScanner';
 import { ProductSchema } from '../../shared/schemas';
 import { Button } from '@/components/ui/button';
@@ -20,8 +23,9 @@ import {
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
 
-const UNITS = ['pièce', 'kg', 'g', 'litre', 'ml', 'm', 'm²', 'm³', 'mètre linéaire', 'rouleau', 'boîte', 'sachet', 'tonne'];
-const isMeter = (u: string | undefined) => !!u && ['m', 'm²', 'm³', 'mètre linéaire'].includes(u);
+const UNITS = ['pièce', 'kg', 'g', 'litre', 'ml', 'm', 'm²', 'm³', 'mètre', 'mètre linéaire', 'rouleau', 'boîte', 'sachet', 'tonne'];
+
+const STATUS_COLOR: Record<StockStatus, string> = { empty: '#dc2626', low: '#d97706', ok: '#059669' };
 
 // Formulaire : tous les champs en chaînes (contrôlés depuis des <input>), convertis à l'enregistrement.
 type ProductForm = {
@@ -34,9 +38,15 @@ type ProductForm = {
   minStock: string | number;
   stockInitial: string | number;
   description: string;
+  unitPrice: string | number;
+  supplier: string;
+  maxStock: string | number;
 };
 
-const empty: ProductForm = { name: '', reference: '', barcode: '', category: '', unit: 'pièce', minStock: 0, stockInitial: 0, description: '' };
+const empty: ProductForm = {
+  name: '', reference: '', barcode: '', category: '', unit: 'pièce', minStock: 0, stockInitial: 0, description: '',
+  unitPrice: '', supplier: '', maxStock: '',
+};
 
 type ScannerTarget = 'search' | 'form' | null;
 
@@ -50,14 +60,16 @@ interface ProductRow {
   minStock: number;
   stockInitial: number;
   description: string;
+  unitPrice?: number;
+  supplier?: string;
+  maxStock?: number;
   qActuel: number;
-  isLow: boolean;
-  isEmpty: boolean;
+  status: StockStatus;
 }
 
 const columnHelper = createColumnHelper<typeof sortableTableFeatures, ProductRow>();
 
-export default function Products() {
+export default function Products({ navigate }: { navigate: NavigateFn }) {
   const products  = useLiveQuery(() => db.products.toArray(), []);
   const movements = useLiveQuery(() => db.movements.toArray(), []);
   const [form,    setForm]    = useState<ProductForm | null>(null);
@@ -65,39 +77,57 @@ export default function Products() {
   const [search,  setSearch]  = useState('');
   const [scanner, setScanner] = useState<ScannerTarget>(null);
 
-  const qtyMap: Record<number, number> = {};
-  movements?.forEach(m => {
-    if (!qtyMap[m.productId]) qtyMap[m.productId] = 0;
-    if (m.type === 'entree') qtyMap[m.productId] += m.quantity;
-    else                     qtyMap[m.productId] -= m.quantity;
-  });
+  const [notice, setNotice] = useState('');
+  const [historyId, setHistoryId] = useState<number | null>(null);
 
-  const rows: ProductRow[] = useMemo(() => (products ?? [])
-    .filter(p =>
-      p.name.toLowerCase().includes(search.toLowerCase()) ||
-      (p.reference || '').toLowerCase().includes(search.toLowerCase()) ||
-      (p.barcode   || '').toLowerCase().includes(search.toLowerCase()) ||
-      (p.category  || '').toLowerCase().includes(search.toLowerCase())
-    )
-    .map(p => {
-      const qActuel = Number(p.stockInitial || 0) + (p.id != null ? (qtyMap[p.id] || 0) : 0);
-      return {
-        ...p,
-        qActuel,
-        isLow: p.minStock > 0 && qActuel <= p.minStock,
-        isEmpty: qActuel <= 0,
-      };
-    }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [products, movements, search]
+  const rows: ProductRow[] = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return computeStockLevels(products ?? [], movements ?? [])
+      .filter(p =>
+        p.name.toLowerCase().includes(q) ||
+        (p.reference || '').toLowerCase().includes(q) ||
+        (p.barcode   || '').toLowerCase().includes(q) ||
+        (p.category  || '').toLowerCase().includes(q)
+      )
+      .map(p => ({ ...p, qActuel: p.qty }));
+  }, [products, movements, search]);
+
+  // Familles déjà utilisées, proposées en autocomplétion pour éviter les variantes (« Tube », « TUBE », « tubes »…).
+  const categories = useMemo(
+    () => [...new Set((products ?? []).map(p => p.category).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'fr')),
+    [products]
+  );
+  const suppliers = useMemo(
+    () => [...new Set((products ?? []).map(p => p.supplier?.trim()).filter(Boolean) as string[])].sort((a, b) => a.localeCompare(b, 'fr')),
+    [products]
   );
 
   async function save() {
     if (!form) return;
+    // Un code-barres ou une référence en double rendrait le scan / l'import ambigus.
+    const barcode   = form.barcode.trim();
+    const reference = form.reference.trim();
+    const clash = (products ?? []).find(p => p.id !== form.id && (
+      (barcode && p.barcode === barcode) ||
+      (reference && (p.reference || '').toLowerCase() === reference.toLowerCase())
+    ));
+    if (clash) {
+      setFormError(clash.barcode === barcode && barcode
+        ? `Ce code-barres est déjà utilisé par « ${clash.name} ».`
+        : `Cette référence est déjà utilisée par « ${clash.name} ».`);
+      return;
+    }
     const parsed = ProductSchema.safeParse({
       ...form,
+      name: form.name.trim(),
+      reference,
+      barcode,
+      category: form.category.trim(),
       minStock: Number(form.minStock) || 0,
       stockInitial: Number(form.stockInitial) || 0,
+      unitPrice: Number(form.unitPrice) || 0,
+      supplier: form.supplier.trim(),
+      maxStock: Number(form.maxStock) || 0,
     });
     if (!parsed.success) {
       setFormError(parsed.error.issues[0]?.message || 'Formulaire invalide');
@@ -110,9 +140,17 @@ export default function Products() {
     setFormError('');
   }
 
-  async function del(id: number) {
-    if (!confirm('Supprimer ce produit ?')) return;
-    await db.products.delete(id);
+  async function del(row: ProductRow) {
+    if (row.id == null) return;
+    // Supprimer un produit déjà utilisé fausserait les bons et l'historique.
+    const usage = await countProductUsage(row.id);
+    if (usage > 0) {
+      setNotice(`« ${row.name} » ne peut pas être supprimé : il apparaît dans ${usage} mouvement(s) ou bon(s). Supprimez d'abord les bons concernés.`);
+      return;
+    }
+    if (!confirm(`Supprimer le produit « ${row.name} » ?`)) return;
+    await deleteProduct(row.id);
+    setNotice('');
   }
 
   function editRow(row: ProductRow) {
@@ -121,6 +159,9 @@ export default function Products() {
       category: row.category, unit: row.unit, minStock: row.minStock,
       stockInitial: row.stockInitial,
       description: row.description,
+      unitPrice: row.unitPrice || '',
+      supplier: row.supplier || '',
+      maxStock: row.maxStock || '',
     });
   }
 
@@ -165,9 +206,9 @@ export default function Products() {
         <div className="text-center">
           <span
             className="text-base font-bold"
-            style={{ color: ctx.row.original.isEmpty ? '#dc2626' : ctx.row.original.isLow ? '#d97706' : '#059669' }}
+            style={{ color: STATUS_COLOR[ctx.row.original.status] }}
           >
-            {ctx.getValue()}
+            {formatQty(ctx.getValue())}
           </span>
           <span className="text-xs text-slate-400 ml-1">{ctx.row.original.unit}</span>
         </div>
@@ -177,29 +218,48 @@ export default function Products() {
       header: 'Min',
       cell: ctx => <div className="text-center text-sm text-slate-400">{ctx.getValue() || '—'}</div>,
     }),
+    columnHelper.accessor(row => row.unitPrice ?? 0, {
+      id: 'unitPrice',
+      header: () => <div className="text-right">P.U.</div>,
+      cell: ctx => (
+        <div className="text-right text-sm text-slate-500 whitespace-nowrap">
+          {ctx.getValue() ? formatMoney(ctx.getValue()) : '—'}
+          {ctx.row.original.supplier && <div className="text-[10px] text-slate-400 truncate max-w-[120px]">{ctx.row.original.supplier}</div>}
+        </div>
+      ),
+    }),
     columnHelper.display({
       id: 'actions',
       cell: ctx => (
         <div className="flex justify-end gap-1">
           <button
+            onClick={() => setHistoryId(ctx.row.original.id ?? null)}
+            className="p-1.5 rounded-lg text-slate-300 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
+            title="Historique des mouvements"
+            aria-label={`Historique de ${ctx.row.original.name}`}
+          >
+            <History size={14} />
+          </button>
+          <button
             onClick={() => editRow(ctx.row.original)}
             className="p-1.5 rounded-lg text-slate-300 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
             title="Modifier"
+            aria-label={`Modifier ${ctx.row.original.name}`}
           >
             <Pencil size={14} />
           </button>
           <button
-            onClick={() => ctx.row.original.id != null && del(ctx.row.original.id)}
+            onClick={() => del(ctx.row.original)}
             className="p-1.5 rounded-lg text-slate-300 hover:text-red-500 hover:bg-red-50 transition-colors"
             title="Supprimer"
+            aria-label={`Supprimer ${ctx.row.original.name}`}
           >
             <Trash2 size={14} />
           </button>
         </div>
       ),
     }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  ]), [qtyMap]);
+  ]), []);
 
   const table = useTable({
     features: sortableTableFeatures,
@@ -209,6 +269,7 @@ export default function Products() {
 
   return (
     <div>
+      <ProductHistoryDialog productId={historyId} onClose={() => setHistoryId(null)} navigate={navigate} />
       {scanner === 'search' && <BarcodeScanner onScan={c => { setScanner(null); setSearch(c); }}       onClose={() => setScanner(null)} />}
       {scanner === 'form'   && <BarcodeScanner onScan={c => { setScanner(null); setForm(f => f ? ({ ...f, barcode: c }) : f); }} onClose={() => setScanner(null)} />}
 
@@ -222,6 +283,13 @@ export default function Products() {
           <Plus size={16} /> Ajouter
         </Button>
       </div>
+
+      {notice && (
+        <div className="mb-4 flex items-start justify-between gap-3 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
+          <span>{notice}</span>
+          <button onClick={() => setNotice('')} className="text-amber-600 hover:text-amber-800 shrink-0" aria-label="Fermer">✕</button>
+        </div>
+      )}
 
       {/* Recherche */}
       <div className="flex gap-2 mb-4">
@@ -283,12 +351,19 @@ export default function Products() {
                 <DialogTitle>{form.id ? 'Modifier le produit' : 'Nouveau produit'}</DialogTitle>
               </DialogHeader>
 
-              <div className="overflow-y-auto flex-1 px-6 py-5 space-y-4">
-                <Field label="Libellé *" value={form.name} onChange={v => setForm(f => f && ({ ...f, name: v }))} />
+              <form
+                id="product-form"
+                onSubmit={e => { e.preventDefault(); save(); }}
+                className="overflow-y-auto flex-1 px-6 py-5 space-y-4"
+              >
+                <Field label="Libellé *" value={form.name} autoFocus onChange={v => setForm(f => f && ({ ...f, name: v }))} />
 
                 <div className="grid grid-cols-2 gap-3">
                   <Field label="Référence" value={form.reference} onChange={v => setForm(f => f && ({ ...f, reference: v }))} />
-                  <Field label="Famille"   value={form.category}  onChange={v => setForm(f => f && ({ ...f, category: v }))} />
+                  <Field label="Famille"   value={form.category}  list="product-categories" onChange={v => setForm(f => f && ({ ...f, category: v }))} />
+                  <datalist id="product-categories">
+                    {categories.map(c => <option key={c} value={c} />)}
+                  </datalist>
                 </div>
 
                 {/* Code-barres */}
@@ -301,7 +376,7 @@ export default function Products() {
                       onChange={e => setForm(f => f && ({ ...f, barcode: e.target.value }))}
                       placeholder="EAN, QR, Code128..."
                     />
-                    <Button type="button" variant="outline" size="icon" onClick={() => setScanner('form')} className="shrink-0">
+                    <Button type="button" variant="outline" size="icon" onClick={() => setScanner('form')} className="shrink-0" title="Scanner le code-barres" aria-label="Scanner le code-barres">
                       <ScanLine size={17} />
                     </Button>
                   </div>
@@ -325,7 +400,7 @@ export default function Products() {
                   <Field
                     label="Q. Initiale"
                     type="number"
-                    step={isMeter(form.unit) ? '0.001' : '1'}
+                    step={quantityStep(form.unit)}
                     value={form.stockInitial}
                     onChange={v => setForm(f => f && ({ ...f, stockInitial: v }))}
                     suffix={form.unit}
@@ -333,12 +408,41 @@ export default function Products() {
                   <Field
                     label="Stock minimum"
                     type="number"
-                    step={isMeter(form.unit) ? '0.001' : '1'}
+                    step={quantityStep(form.unit)}
                     value={form.minStock}
                     onChange={v => setForm(f => f && ({ ...f, minStock: v }))}
                     suffix={form.unit}
                   />
                 </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <Field
+                    label="Prix unitaire"
+                    type="number"
+                    step="0.01"
+                    value={form.unitPrice}
+                    onChange={v => setForm(f => f && ({ ...f, unitPrice: v }))}
+                  />
+                  <Field
+                    label="Stock cible"
+                    type="number"
+                    step={quantityStep(form.unit)}
+                    value={form.maxStock}
+                    onChange={v => setForm(f => f && ({ ...f, maxStock: v }))}
+                    suffix={form.unit}
+                    hint="Quantité visée au réapprovisionnement (vide : 2 × minimum)"
+                  />
+                </div>
+
+                <Field
+                  label="Fournisseur habituel"
+                  value={form.supplier}
+                  list="product-suppliers"
+                  onChange={v => setForm(f => f && ({ ...f, supplier: v }))}
+                />
+                <datalist id="product-suppliers">
+                  {suppliers.map(sup => <option key={sup} value={sup} />)}
+                </datalist>
 
                 <div>
                   <Label className="block mb-1.5">Observations</Label>
@@ -347,7 +451,7 @@ export default function Products() {
                     onChange={e => setForm(f => f && ({ ...f, description: e.target.value }))}
                     className="w-full px-3 py-2.5 border border-input rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-ring resize-none"
                     rows={3}
-                    placeholder="Emplacement, fournisseur, remarque..."
+                    placeholder="Emplacement, remarque..."
                   />
                 </div>
 
@@ -357,13 +461,13 @@ export default function Products() {
                     <span>{formError}</span>
                   </div>
                 )}
-              </div>
+              </form>
 
               <DialogFooter>
                 <Button variant="outline" className="flex-1" onClick={() => { setForm(null); setFormError(''); }}>
                   Annuler
                 </Button>
-                <Button className="flex-1" onClick={save}>
+                <Button className="flex-1" type="submit" form="product-form">
                   Enregistrer
                 </Button>
               </DialogFooter>
@@ -382,20 +486,24 @@ interface FieldProps {
   type?: string;
   step?: string;
   suffix?: string;
+  list?: string;
+  autoFocus?: boolean;
+  hint?: string;
 }
 
-function Field({ label, value, onChange, type = 'text', step, suffix }: FieldProps) {
+function Field({ label, value, onChange, type = 'text', step, suffix, list, autoFocus, hint }: FieldProps) {
   return (
     <div>
       <Label className="block mb-1.5">{label}</Label>
       <div className="relative">
         <Input
-          type={type} step={step} min={type === 'number' ? '0' : undefined}
+          type={type} step={step} min={type === 'number' ? '0' : undefined} list={list} autoFocus={autoFocus}
           value={value} onChange={e => onChange(e.target.value)}
           className={suffix ? 'pr-12' : ''}
         />
         {suffix && <span className="absolute right-3 top-2.5 text-xs text-slate-400">{suffix}</span>}
       </div>
+      {hint && <p className="text-[11px] text-slate-400 mt-1">{hint}</p>}
     </div>
   );
 }

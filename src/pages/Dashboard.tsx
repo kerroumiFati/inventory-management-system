@@ -1,7 +1,9 @@
 import type { ReactNode, CSSProperties } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db';
-import { Package, ArrowDownCircle, FileText, AlertTriangle, TrendingUp, ArrowUpRight, ArrowDownRight } from 'lucide-react';
+import { computeStockLevels, formatMoney, formatQty } from '@/lib/stock';
+import { Package, ArrowDownCircle, FileText, AlertTriangle, TrendingUp, ArrowUpRight, ArrowDownRight, Wallet, ClipboardCheck, ShoppingCart } from 'lucide-react';
+import { CURRENCY } from '../config';
 import type { NavigateFn } from '../types';
 import type { Product } from '../../shared/schemas';
 import { Card } from '@/components/ui/card';
@@ -9,10 +11,6 @@ import { Badge } from '@/components/ui/badge';
 
 interface DashboardProps {
   navigate: NavigateFn;
-}
-
-interface StockRow extends Product {
-  qty: number;
 }
 
 export default function Dashboard({ navigate }: DashboardProps) {
@@ -24,26 +22,17 @@ export default function Dashboard({ navigate }: DashboardProps) {
     () => db.movements.orderBy('date').reverse().limit(8).toArray(), []
   );
 
-  const stockMap = useLiveQuery(async () => {
-    const prods = await db.products.toArray();
-    const mvts  = await db.movements.toArray();
-    const map: Record<number, StockRow> = {};
-    prods.forEach(p => { if (p.id != null) map[p.id] = { ...p, qty: Number(p.stockInitial) || 0 }; });
-    mvts.forEach(m => {
-      if (!map[m.productId]) return;
-      if (m.type === 'entree') map[m.productId].qty += m.quantity;
-      else                     map[m.productId].qty -= m.quantity;
-    });
-    return map;
-  }, []);
-
   const prodMap: Record<number, Product> = {};
   products?.forEach(p => { if (p.id != null) prodMap[p.id] = p; });
 
-  const lowStock   = stockMap ? Object.values(stockMap).filter(p => p.minStock > 0 && p.qty <= p.minStock) : [];
-  const emptyStock = stockMap ? Object.values(stockMap).filter(p => p.qty <= 0) : [];
+  // Articles à surveiller : épuisés d'abord, puis faibles (les plus proches de zéro en premier).
+  const levels     = products && allMvts ? computeStockLevels(products, allMvts) : [];
+  const lowStock   = levels
+    .filter(p => p.status !== 'ok')
+    .sort((a, b) => (a.status === b.status ? a.qty - b.qty : a.status === 'empty' ? -1 : 1));
+  const emptyStock = lowStock.filter(p => p.status === 'empty');
 
-  const sortiesCount = allMvts?.filter(m => m.type === 'sortie').length ?? 0;
+  const stockValue = levels.reduce((s, p) => s + p.value, 0);
 
   return (
     <div>
@@ -64,18 +53,18 @@ export default function Dashboard({ navigate }: DashboardProps) {
           onClick={() => navigate('products')}
         />
         <KpiCard
-          icon={<ArrowDownCircle size={18} />}
-          label="Sorties"
-          value={sortiesCount}
-          sub="mouvements sortants"
+          icon={<Wallet size={18} />}
+          label="Valeur du stock"
+          value={formatMoney(stockValue, CURRENCY)}
+          sub="voir les rapports"
           accentColor="#f59e0b"
-          onClick={() => navigate('bons')}
+          onClick={() => navigate('rapports')}
         />
         <KpiCard
           icon={<FileText size={18} />}
           label="Bons émis"
           value={bonsCount ?? 0}
-          sub="bons de sortie"
+          sub="sorties, réceptions, commandes"
           accentColor="#10b981"
           onClick={() => navigate('bons')}
         />
@@ -86,7 +75,7 @@ export default function Dashboard({ navigate }: DashboardProps) {
           sub={`dont ${emptyStock.length} épuisé(s)`}
           accentColor="#ef4444"
           alert={lowStock.length > 0}
-          onClick={() => navigate('stock')}
+          onClick={() => navigate('reappro')}
         />
       </div>
 
@@ -99,7 +88,7 @@ export default function Dashboard({ navigate }: DashboardProps) {
               <div className="px-5 py-3.5" style={{ background: '#fffbeb', borderBottom: '1px solid #fcd34d' }}>
                 <div className="flex items-center gap-2 text-sm font-semibold" style={{ color: '#92400e' }}>
                   <AlertTriangle size={14} />
-                  {lowStock.length} article(s) en stock faible
+                  {lowStock.length} article(s) à réapprovisionner
                 </div>
               </div>
               <div className="divide-y" style={{ divideColor: '#fef9c3' } as CSSProperties}>
@@ -111,9 +100,9 @@ export default function Dashboard({ navigate }: DashboardProps) {
                     </div>
                     <div className="text-right shrink-0 ml-2">
                       <div className="text-sm font-bold" style={{ color: p.qty <= 0 ? '#dc2626' : '#d97706' }}>
-                        {p.qty} <span className="text-xs font-normal text-slate-400">{p.unit}</span>
+                        {formatQty(p.qty)} <span className="text-xs font-normal text-slate-400">{p.unit}</span>
                       </div>
-                      <div className="text-xs text-slate-400">min {p.minStock}</div>
+                      <div className="text-xs text-slate-400">{p.minStock > 0 ? `min ${p.minStock}` : 'épuisé'}</div>
                     </div>
                   </div>
                 ))}
@@ -125,11 +114,11 @@ export default function Dashboard({ navigate }: DashboardProps) {
               </div>
               <div className="px-5 py-3" style={{ borderTop: '1px solid #fcd34d' }}>
                 <button
-                  onClick={() => navigate('stock')}
+                  onClick={() => navigate('reappro')}
                   className="text-xs font-semibold flex items-center gap-1 hover:underline"
                   style={{ color: '#b45309' }}
                 >
-                  Voir les niveaux de stock <ArrowUpRight size={12} />
+                  Préparer les commandes <ArrowUpRight size={12} />
                 </button>
               </div>
             </Card>
@@ -162,6 +151,22 @@ export default function Dashboard({ navigate }: DashboardProps) {
                 bg="#d1fae5"
                 icon={<Package size={15} />}
                 onClick={() => navigate('products')}
+              />
+              <QuickAction
+                label="Faire un inventaire"
+                sub="Compter et corriger les écarts"
+                color="#7c3aed"
+                bg="#ede9fe"
+                icon={<ClipboardCheck size={15} />}
+                onClick={() => navigate('inventaire')}
+              />
+              <QuickAction
+                label="Réapprovisionner"
+                sub="Commandes fournisseurs"
+                color="#0284c7"
+                bg="#e0f2fe"
+                icon={<ShoppingCart size={15} />}
+                onClick={() => navigate('reappro')}
               />
               <QuickAction
                 label="Importer un fichier Excel"
@@ -225,7 +230,10 @@ export default function Dashboard({ navigate }: DashboardProps) {
                     >
                       <div className="min-w-0 pr-2">
                         <div className="text-sm font-medium text-slate-800 truncate">{prod?.name ?? '—'}</div>
-                        <div className="text-xs text-slate-400 mt-0.5">{m.date?.slice(0, 10)}</div>
+                        <div className="text-xs text-slate-400 mt-0.5">
+                          {m.date ? new Date(m.date).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''}
+                          {m.createdBy && <> · {m.createdBy}</>}
+                        </div>
                       </div>
                       <div className="text-xs font-mono text-slate-400 truncate">{m.bonNumber || '—'}</div>
                       <div className="flex justify-center">
@@ -237,7 +245,7 @@ export default function Dashboard({ navigate }: DashboardProps) {
                         className="text-sm font-bold text-right"
                         style={{ color: isSortie ? '#dc2626' : '#059669' }}
                       >
-                        {isSortie ? '−' : '+'}{m.quantity}
+                        {isSortie ? '−' : '+'}{formatQty(m.quantity)}
                         <span className="text-xs font-normal text-slate-400 ml-1">{prod?.unit}</span>
                       </div>
                     </div>
@@ -255,7 +263,7 @@ export default function Dashboard({ navigate }: DashboardProps) {
 interface KpiCardProps {
   icon: ReactNode;
   label: string;
-  value: number;
+  value: number | string;
   sub: string;
   accentColor: string;
   alert?: boolean;
@@ -277,7 +285,7 @@ function KpiCard({ icon, label, value, sub, accentColor, alert, onClick }: KpiCa
           <div>
             <div
               className="text-3xl font-bold tracking-tight"
-              style={{ color: alert && value > 0 ? accentColor : '#0f172a' }}
+              style={{ color: alert && Number(value) > 0 ? accentColor : '#0f172a' }}
             >
               {value}
             </div>

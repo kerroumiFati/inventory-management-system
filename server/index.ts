@@ -6,11 +6,18 @@ import { dirname, join } from 'path';
 import { randomBytes } from 'crypto';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
-import { ZodError } from 'zod';
+import { ZodError, type ZodType } from 'zod';
 import {
   LoginRequestSchema,
   ChangePasswordRequestSchema,
+  CreateUserRequestSchema,
+  UpdateUserRequestSchema,
   SyncPushRequestSchema,
+  SYNC_TABLES,
+  type SyncTable,
+  type SyncPullResponse,
+  type SyncPushResponse,
+  type UserInfo,
 } from '../shared/schemas';
 
 interface AuthTokenPayload {
@@ -25,6 +32,14 @@ interface UserRow {
   password: string;
   role: string;
   created_at: string;
+}
+
+interface RecordRow {
+  tbl: SyncTable;
+  uid: string;
+  data: string;
+  updatedAt: string;
+  deleted: number;
 }
 
 declare global {
@@ -49,56 +64,34 @@ const db = new Database(process.env.DB_PATH || join(__dirname, 'stock.db'));
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
-const envJwtSecret = process.env.JWT_SECRET;
-const JWT_SECRET: string = envJwtSecret ?? randomBytes(32).toString('hex');
-if (!envJwtSecret) {
-  console.warn('  ! JWT_SECRET absent de l\'environnement : un secret aléatoire a été généré pour cette exécution.');
-  console.warn('  ! Les sessions existantes seront invalidées à chaque redémarrage tant que JWT_SECRET n\'est pas défini dans server/.env');
-}
+// Date de modification attribuée aux données antérieures à la synchro par uid :
+// n'importe quelle modification ultérieure d'un poste l'emporte sur elles.
+const LEGACY_DATE = '1970-01-01T00:00:00.000Z';
 
 db.exec(`
-  CREATE TABLE IF NOT EXISTS products (
-    id         INTEGER PRIMARY KEY,
-    name       TEXT    NOT NULL,
-    reference  TEXT    DEFAULT '',
-    barcode    TEXT    DEFAULT '',
-    category   TEXT    DEFAULT '',
-    unit       TEXT    DEFAULT 'pièce',
-    minStock   REAL    DEFAULT 0,
-    stockInitial REAL  DEFAULT 0,
-    description TEXT   DEFAULT '',
-    updatedAt  TEXT    DEFAULT (datetime('now'))
+  -- Données métier : une ligne par enregistrement synchronisé, identifié par (table, uid).
+  -- rev : valeur du compteur global lors de la dernière écriture (permet le pull incrémental).
+  CREATE TABLE IF NOT EXISTS records (
+    tbl       TEXT    NOT NULL,
+    uid       TEXT    NOT NULL,
+    data      TEXT    NOT NULL,
+    updatedAt TEXT    NOT NULL,
+    deleted   INTEGER NOT NULL DEFAULT 0,
+    rev       INTEGER NOT NULL,
+    origin    TEXT    NOT NULL DEFAULT '',
+    PRIMARY KEY (tbl, uid)
   );
+  CREATE INDEX IF NOT EXISTS records_rev ON records(rev);
 
-  CREATE TABLE IF NOT EXISTS movements (
-    id         INTEGER PRIMARY KEY,
-    productId  INTEGER NOT NULL,
-    type       TEXT    NOT NULL,
-    date       TEXT    NOT NULL,
-    quantity   REAL    NOT NULL,
-    bonNumber  TEXT    DEFAULT '',
-    note       TEXT    DEFAULT ''
+  CREATE TABLE IF NOT EXISTS sync_meta (
+    id       INTEGER PRIMARY KEY CHECK (id = 1),
+    revision INTEGER NOT NULL DEFAULT 0
   );
+  INSERT OR IGNORE INTO sync_meta (id, revision) VALUES (1, 0);
 
-  CREATE TABLE IF NOT EXISTS bons (
-    id          INTEGER PRIMARY KEY,
-    number      TEXT NOT NULL,
-    date        TEXT NOT NULL,
-    type        TEXT DEFAULT 'sortie',
-    note        TEXT DEFAULT '',
-    destination TEXT DEFAULT '',
-    isFormal    INTEGER DEFAULT 0,
-    fileName    TEXT DEFAULT NULL,
-    fileType    TEXT DEFAULT NULL,
-    fileData    TEXT DEFAULT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS bon_items (
-    id        INTEGER PRIMARY KEY,
-    bonId     INTEGER NOT NULL,
-    productId INTEGER NOT NULL,
-    quantity  REAL    NOT NULL,
-    note      TEXT    DEFAULT ''
+  CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
   );
 
   CREATE TABLE IF NOT EXISTS users (
@@ -109,6 +102,78 @@ db.exec(`
     created_at TEXT DEFAULT (datetime('now'))
   );
 `);
+
+function nextRevision(): number {
+  db.prepare('UPDATE sync_meta SET revision = revision + 1 WHERE id = 1').run();
+  return currentRevision();
+}
+
+function currentRevision(): number {
+  return (db.prepare('SELECT revision FROM sync_meta WHERE id = 1').get() as { revision: number }).revision;
+}
+
+// ── Migration des anciennes tables (synchro par remplacement complet) ──
+// Les uid « legacy-<table>-<id> » sont aussi ceux qu'attribue la migration côté poste,
+// ce qui permet aux postes déjà synchronisés de retrouver leurs lignes.
+function migrateLegacyTables() {
+  const hasTable = (name: string) =>
+    !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
+  if (!hasTable('products')) return;
+
+  const migrate = db.transaction(() => {
+    const ins = db.prepare(
+      'INSERT OR IGNORE INTO records (tbl, uid, data, updatedAt, deleted, rev) VALUES (?, ?, ?, ?, 0, ?)'
+    );
+    const put = (tbl: SyncTable, id: number, data: Record<string, unknown>) =>
+      ins.run(tbl, `legacy-${tbl}-${id}`, JSON.stringify(data), LEGACY_DATE, nextRevision());
+
+    type Row = Record<string, unknown> & { id: number };
+    const products  = db.prepare('SELECT * FROM products').all() as Row[];
+    const bons      = db.prepare('SELECT * FROM bons').all() as Row[];
+    const movements = db.prepare('SELECT * FROM movements').all() as Row[];
+    const items     = db.prepare('SELECT * FROM bon_items').all() as Row[];
+    const bonIdByNumber = new Map(bons.map(b => [String(b.number), b.id]));
+
+    // updatedAt local à l'ancien serveur : remplacé par LEGACY_DATE.
+    for (const { id, ...p } of products) { delete p.updatedAt; put('products', id, p); }
+    for (const { id, ...b } of bons) put('bons', id, { ...b, isFormal: !!b.isFormal });
+    for (const { id, productId, ...m } of movements) {
+      const bonId = m.bonNumber ? bonIdByNumber.get(String(m.bonNumber)) : undefined;
+      put('movements', id, {
+        ...m,
+        productUid: `legacy-products-${productId}`,
+        bonUid: bonId != null ? `legacy-bons-${bonId}` : null,
+      });
+    }
+    for (const { id, bonId, productId, ...i } of items) {
+      put('bonItems', id, { ...i, bonUid: `legacy-bons-${bonId}`, productUid: `legacy-products-${productId}` });
+    }
+
+    // Conservées sous un autre nom, à titre de sauvegarde.
+    for (const t of ['products', 'movements', 'bons', 'bon_items']) {
+      db.exec(`ALTER TABLE ${t} RENAME TO legacy_${t}`);
+    }
+    return products.length + bons.length + movements.length + items.length;
+  });
+
+  const count = migrate();
+  console.log(`  ✓ Migration vers la synchro par uid : ${count} ligne(s) reprise(s)`);
+}
+migrateLegacyTables();
+
+// ── Secret JWT ──────────────────────────────────────────────
+// Sans JWT_SECRET, un secret est généré une fois puis conservé en base :
+// les sessions survivent ainsi aux redémarrages du serveur.
+function resolveJwtSecret(): string {
+  if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
+  const row = db.prepare("SELECT value FROM settings WHERE key = 'jwt_secret'").get() as { value: string } | undefined;
+  if (row) return row.value;
+  const secret = randomBytes(32).toString('hex');
+  db.prepare("INSERT INTO settings (key, value) VALUES ('jwt_secret', ?)").run(secret);
+  console.warn('  ! JWT_SECRET absent de l\'environnement : un secret a été généré et enregistré dans la base.');
+  return secret;
+}
+const JWT_SECRET = resolveJwtSecret();
 
 // Créer le compte admin par défaut si aucun utilisateur n'existe
 const userCount = db.prepare('SELECT COUNT(*) as count FROM users').get() as { count: number };
@@ -126,26 +191,76 @@ if (userCount.count === 0) {
 }
 
 const app = express();
-app.use(cors());
-app.use(express.json({ limit: '50mb' }));
 
-// ── Middleware JWT ──────────────────────────────────────────
+// CORS_ORIGIN (liste séparée par des virgules) restreint les origines autorisées.
+// Sans valeur, toutes les origines sont acceptées : l'API n'utilise pas de cookies
+// (jeton Bearer), une page tierce ne peut donc pas agir à la place d'un utilisateur.
+const corsOrigins = process.env.CORS_ORIGIN?.split(',').map(s => s.trim()).filter(Boolean);
+app.use(cors(corsOrigins?.length ? { origin: corsOrigins } : undefined));
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  next();
+});
+app.use(express.json({ limit: process.env.BODY_LIMIT || '50mb' }));
+
+// ── Middlewares ─────────────────────────────────────────────
+// Le rôle est relu en base à chaque requête : un compte supprimé ou rétrogradé
+// perd ses droits immédiatement, sans attendre l'expiration du jeton.
 function requireAuth(req: Request, res: Response, next: NextFunction) {
   const auth = req.headers.authorization;
   if (!auth || !auth.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Token manquant' });
   }
+  let payload: AuthTokenPayload;
   try {
-    req.user = jwt.verify(auth.slice(7), JWT_SECRET) as unknown as AuthTokenPayload;
-    next();
+    payload = jwt.verify(auth.slice(7), JWT_SECRET) as unknown as AuthTokenPayload;
   } catch {
-    res.status(401).json({ error: 'Token invalide ou expiré' });
+    return res.status(401).json({ error: 'Token invalide ou expiré' });
+  }
+  const user = db.prepare('SELECT id, username, role FROM users WHERE id = ?').get(payload.id) as AuthTokenPayload | undefined;
+  if (!user) return res.status(401).json({ error: 'Compte supprimé' });
+  req.user = user;
+  next();
+}
+
+function requireAdmin(req: Request, res: Response, next: NextFunction) {
+  if (req.user?.role !== 'admin') return res.status(403).json({ error: 'Réservé aux administrateurs' });
+  next();
+}
+
+// Valide le corps de la requête ; en cas d'erreur, répond 400 et renvoie null.
+function parseBody<T>(schema: ZodType<T>, req: Request, res: Response): T | null {
+  try {
+    return schema.parse(req.body);
+  } catch (err) {
+    res.status(400).json({ error: err instanceof ZodError ? err.issues.map(i => i.message).join(', ') : 'Requête invalide' });
+    return null;
   }
 }
 
-// Transforme une erreur Zod en réponse 400 lisible.
-function zodErrorMessage(err: ZodError): string {
-  return err.issues.map(i => i.message).join(', ');
+// ── Limitation des tentatives de connexion ──────────────────
+// Après LOGIN_MAX_FAILURES échecs pour un même couple (IP, identifiant),
+// les tentatives sont refusées jusqu'à la fin de la fenêtre.
+const LOGIN_MAX_FAILURES = 5;
+const LOGIN_WINDOW_MS    = 15 * 60 * 1000;
+const loginFailures = new Map<string, { count: number; since: number }>();
+
+function loginKey(req: Request, username: string) {
+  return `${req.ip}|${username.toLowerCase()}`;
+}
+
+function loginBlockedFor(key: string): number {
+  const entry = loginFailures.get(key);
+  if (!entry) return 0;
+  const elapsed = Date.now() - entry.since;
+  if (elapsed > LOGIN_WINDOW_MS) { loginFailures.delete(key); return 0; }
+  return entry.count >= LOGIN_MAX_FAILURES ? LOGIN_WINDOW_MS - elapsed : 0;
+}
+
+function recordLoginFailure(key: string) {
+  const entry = loginFailures.get(key);
+  if (!entry || Date.now() - entry.since > LOGIN_WINDOW_MS) loginFailures.set(key, { count: 1, since: Date.now() });
+  else entry.count++;
 }
 
 // ── Statut (public) ─────────────────────────────────────────
@@ -153,18 +268,24 @@ app.get('/api/status', (_req, res) => res.json({ ok: true }));
 
 // ── Auth : login ─────────────────────────────────────────────
 app.post('/api/auth/login', (req, res) => {
-  let body;
-  try {
-    body = LoginRequestSchema.parse(req.body);
-  } catch (err) {
-    return res.status(400).json({ error: err instanceof ZodError ? zodErrorMessage(err) : 'Identifiants requis' });
-  }
+  const body = parseBody(LoginRequestSchema, req, res);
+  if (!body) return;
   const { username, password } = body;
+
+  const key = loginKey(req, username);
+  const wait = loginBlockedFor(key);
+  if (wait > 0) {
+    return res.status(429).json({
+      error: `Trop de tentatives échouées. Réessayez dans ${Math.ceil(wait / 60000)} minute(s).`,
+    });
+  }
 
   const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username) as UserRow | undefined;
   if (!user || !bcrypt.compareSync(password, user.password)) {
+    recordLoginFailure(key);
     return res.status(401).json({ error: 'Identifiant ou mot de passe incorrect' });
   }
+  loginFailures.delete(key);
 
   const token = jwt.sign(
     { id: user.id, username: user.username, role: user.role },
@@ -177,12 +298,8 @@ app.post('/api/auth/login', (req, res) => {
 
 // ── Auth : changer mot de passe ──────────────────────────────
 app.post('/api/auth/change-password', requireAuth, (req, res) => {
-  let body;
-  try {
-    body = ChangePasswordRequestSchema.parse(req.body);
-  } catch (err) {
-    return res.status(400).json({ error: err instanceof ZodError ? zodErrorMessage(err) : 'Champs requis' });
-  }
+  const body = parseBody(ChangePasswordRequestSchema, req, res);
+  if (!body) return;
   const { currentPassword, newPassword } = body;
 
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user!.id) as UserRow;
@@ -195,64 +312,125 @@ app.post('/api/auth/change-password', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-// ── SYNC : le client envoie toutes ses données ──────────────
-app.post('/api/sync/push', requireAuth, (req, res) => {
-  let body;
-  try {
-    body = SyncPushRequestSchema.parse(req.body);
-  } catch (err) {
-    return res.status(400).json({ error: err instanceof ZodError ? zodErrorMessage(err) : 'Payload invalide' });
+// ── Utilisateurs (administrateurs) ──────────────────────────
+function adminCount(): number {
+  return (db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'").get() as { n: number }).n;
+}
+
+app.get('/api/users', requireAuth, requireAdmin, (_req, res) => {
+  const users = db.prepare('SELECT id, username, role, created_at FROM users ORDER BY username').all() as UserInfo[];
+  res.json(users);
+});
+
+app.post('/api/users', requireAuth, requireAdmin, (req, res) => {
+  const body = parseBody(CreateUserRequestSchema, req, res);
+  if (!body) return;
+  if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(body.username)) {
+    return res.status(409).json({ error: 'Cet identifiant existe déjà' });
   }
-  const { products, movements, bons, bonItems } = body;
+  const info = db.prepare('INSERT INTO users (username, password, role) VALUES (?, ?, ?)')
+    .run(body.username, bcrypt.hashSync(body.password, 10), body.role);
+  res.status(201).json(db.prepare('SELECT id, username, role, created_at FROM users WHERE id = ?').get(info.lastInsertRowid));
+});
+
+app.patch('/api/users/:id', requireAuth, requireAdmin, (req, res) => {
+  const body = parseBody(UpdateUserRequestSchema, req, res);
+  if (!body) return;
+  const id = Number(req.params.id);
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined;
+  if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
+  if (body.role && body.role !== 'admin' && user.role === 'admin' && adminCount() <= 1) {
+    return res.status(400).json({ error: 'Il doit rester au moins un administrateur' });
+  }
+  if (body.role) db.prepare('UPDATE users SET role = ? WHERE id = ?').run(body.role, id);
+  if (body.password) db.prepare('UPDATE users SET password = ? WHERE id = ?').run(bcrypt.hashSync(body.password, 10), id);
+  res.json(db.prepare('SELECT id, username, role, created_at FROM users WHERE id = ?').get(id));
+});
+
+app.delete('/api/users/:id', requireAuth, requireAdmin, (req, res) => {
+  const id = Number(req.params.id);
+  if (id === req.user!.id) return res.status(400).json({ error: 'Vous ne pouvez pas supprimer votre propre compte' });
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined;
+  if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
+  if (user.role === 'admin' && adminCount() <= 1) {
+    return res.status(400).json({ error: 'Il doit rester au moins un administrateur' });
+  }
+  db.prepare('DELETE FROM users WHERE id = ?').run(id);
+  res.json({ ok: true });
+});
+
+// ── SYNC : le poste envoie ses modifications ────────────────
+// Fusion ligne par ligne : la modification la plus récente (updatedAt) l'emporte.
+// Les lignes que le poste n'a pas modifiées ne sont pas envoyées et restent intactes.
+app.post('/api/sync/push', requireAuth, (req, res) => {
+  const body = parseBody(SyncPushRequestSchema, req, res);
+  if (!body) return;
+
+  const getRow = db.prepare('SELECT updatedAt, deleted FROM records WHERE tbl = ? AND uid = ?');
+  const upsert = db.prepare(`
+    INSERT INTO records (tbl, uid, data, updatedAt, deleted, rev, origin) VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (tbl, uid) DO UPDATE SET
+      data = excluded.data, updatedAt = excluded.updatedAt, deleted = excluded.deleted,
+      rev = excluded.rev, origin = excluded.origin`);
+
+  let applied = 0;
+  let stale = 0;
 
   const run = db.transaction(() => {
-    db.prepare('DELETE FROM bon_items').run();
-    db.prepare('DELETE FROM movements').run();
-    db.prepare('DELETE FROM bons').run();
-    db.prepare('DELETE FROM products').run();
-
-    const insProduct = db.prepare(`
-      INSERT INTO products (id,name,reference,barcode,category,unit,minStock,stockInitial,description,updatedAt)
-      VALUES (?,?,?,?,?,?,?,?,?,?)`);
-    for (const p of products) {
-      insProduct.run(p.id, p.name, p.reference || '', p.barcode || '', p.category || '',
-        p.unit || 'pièce', p.minStock || 0, p.stockInitial || 0, p.description || '', new Date().toISOString());
+    for (const tbl of SYNC_TABLES) {
+      for (const { uid, updatedAt, ...data } of body[tbl]) {
+        const existing = getRow.get(tbl, uid) as Pick<RecordRow, 'updatedAt' | 'deleted'> | undefined;
+        if (existing && existing.updatedAt > updatedAt) { stale++; continue; }
+        // Traçabilité : une nouvelle saisie sans auteur (ancien poste) est attribuée au compte qui l'envoie.
+        const row = data as { createdBy?: string };
+        if (!existing && (tbl === 'movements' || tbl === 'bons') && !row.createdBy) row.createdBy = req.user!.username;
+        upsert.run(tbl, uid, JSON.stringify(data), updatedAt, 0, nextRevision(), body.clientId);
+        applied++;
+      }
     }
-
-    const insMov = db.prepare(`
-      INSERT INTO movements (id,productId,type,date,quantity,bonNumber,note)
-      VALUES (?,?,?,?,?,?,?)`);
-    for (const m of movements) {
-      insMov.run(m.id, m.productId, m.type, m.date, m.quantity, m.bonNumber || '', m.note || '');
-    }
-
-    const insBon = db.prepare(`
-      INSERT INTO bons (id,number,date,type,note,destination,isFormal,fileName,fileType,fileData)
-      VALUES (?,?,?,?,?,?,?,?,?,?)`);
-    for (const b of bons) {
-      insBon.run(b.id, b.number, b.date, b.type || 'sortie', b.note || '', b.destination || '',
-        b.isFormal ? 1 : 0, b.fileName || null, b.fileType || null, b.fileData || null);
-    }
-
-    const insItem = db.prepare(`
-      INSERT INTO bon_items (id,bonId,productId,quantity,note)
-      VALUES (?,?,?,?,?)`);
-    for (const i of bonItems) {
-      insItem.run(i.id, i.bonId, i.productId, i.quantity, i.note || '');
+    for (const { tbl, uid, deletedAt } of body.deletions) {
+      const existing = getRow.get(tbl, uid) as Pick<RecordRow, 'updatedAt' | 'deleted'> | undefined;
+      // Une modification postérieure à la suppression (sur un autre poste) l'emporte.
+      if (existing && (existing.deleted || existing.updatedAt > deletedAt)) { stale++; continue; }
+      // Les données d'une ligne supprimée sont vidées (pièces jointes notamment).
+      upsert.run(tbl, uid, '{}', deletedAt, 1, nextRevision(), body.clientId);
+      applied++;
     }
   });
 
   run();
-  res.json({ ok: true, synced: { products: products.length, movements: movements.length, bons: bons.length } });
+  const response: SyncPushResponse = { ok: true, revision: currentRevision(), applied, stale };
+  res.json(response);
 });
 
-// ── SYNC : le client récupère toutes les données ────────────
-app.get('/api/sync/pull', requireAuth, (_req, res) => {
-  const products  = db.prepare('SELECT * FROM products').all();
-  const movements = db.prepare('SELECT * FROM movements').all();
-  const bons      = db.prepare('SELECT * FROM bons').all();
-  const bonItems  = db.prepare('SELECT * FROM bon_items').all();
-  res.json({ products, movements, bons, bonItems });
+// ── SYNC : le poste récupère les modifications ──────────────
+// ?since=N : seulement les lignes écrites après la révision N (0 = tout).
+// ?clientId=X : exclut les lignes dont la dernière version vient de ce poste (il les a déjà).
+app.get('/api/sync/pull', requireAuth, (req, res) => {
+  const since    = Math.max(0, Number(req.query.since) || 0);
+  const clientId = typeof req.query.clientId === 'string' ? req.query.clientId : '';
+  const full     = since === 0;
+
+  // La révision est lue dans la même transaction que les lignes, pour ne rien manquer.
+  const read = db.transaction(() => {
+    const rows = db.prepare(
+      full
+        ? 'SELECT tbl, uid, data, updatedAt, deleted FROM records WHERE deleted = 0'
+        : 'SELECT tbl, uid, data, updatedAt, deleted FROM records WHERE rev > ? AND origin != ?'
+    ).all(...(full ? [] : [since, clientId])) as RecordRow[];
+    return { rows, revision: currentRevision() };
+  });
+  const { rows, revision } = read();
+
+  const response: SyncPullResponse = {
+    revision, full, products: [], movements: [], bons: [], bonItems: [], deletions: [],
+  };
+  for (const r of rows) {
+    if (r.deleted) { response.deletions.push({ tbl: r.tbl, uid: r.uid, deletedAt: r.updatedAt }); continue; }
+    const list = response[r.tbl] as Record<string, unknown>[];
+    list.push({ ...JSON.parse(r.data), uid: r.uid, updatedAt: r.updatedAt });
+  }
+  res.json(response);
 });
 
 export { app, db };

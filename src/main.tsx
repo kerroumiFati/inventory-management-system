@@ -5,7 +5,8 @@ import './index.css'
 import App from './App.tsx'
 import { AuthProvider } from './contexts/AuthContext.tsx'
 
-if ('serviceWorker' in navigator) {
+// En dev, le service worker servirait des modules Vite périmés : production uniquement.
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
   });

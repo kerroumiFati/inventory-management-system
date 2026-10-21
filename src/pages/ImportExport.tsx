@@ -2,12 +2,18 @@ import { useState, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db';
 import * as XLSX from 'xlsx';
+import { computeStockLevels, netMovementsByProduct, parseNumber, stockInitialForTarget } from '@/lib/stock';
 import { Upload, Download, FileSpreadsheet, Check, AlertCircle, Info } from 'lucide-react';
 import type { Product, Bon } from '../../shared/schemas';
+import { bonTypeInfo } from '@/lib/bons';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 
 type ExcelRow = Record<string, string | number | undefined>;
+
+const NAME_COLUMNS = ['Libellé', 'Désignation', 'Nom', 'name', 'NAME', 'LIBELLE', 'libellé'];
+
+const today = () => new Date().toISOString().slice(0, 10);
 
 // Résout une valeur depuis plusieurs noms de colonnes possibles
 function col(row: ExcelRow, ...keys: string[]): string | number {
@@ -39,7 +45,8 @@ export default function ImportExport() {
 
   function notify(text: string, ok = true) {
     setMsg({ text, ok });
-    setTimeout(() => setMsg(null), 4000);
+    // Les erreurs restent affichées jusqu'à la prochaine action : l'utilisateur doit pouvoir les lire.
+    if (ok) setTimeout(() => setMsg(m => (m?.text === text ? null : m)), 4000);
   }
 
   // ── Export ──────────────────────────────────────────────────────────────────
@@ -53,22 +60,20 @@ export default function ImportExport() {
   async function exportInventaire() {
     if (!products) return;
     // Format PRESTINFO : Réf, Libellé, Famille, Q. Actuel
-    const mvtMap: Record<number, number> = {};
-    movements?.forEach(m => {
-      if (!mvtMap[m.productId]) mvtMap[m.productId] = 0;
-      if (m.type === 'entree') mvtMap[m.productId] += m.quantity;
-      else mvtMap[m.productId] -= m.quantity;
-    });
-    const rows = products.map(p => ({
+    const rows = computeStockLevels(products, movements ?? []).map(p => ({
       'Réf':       p.reference || '',
       'Libellé':   p.name,
       'Famille':   p.category || '',
-      'Q. Actuel': (Number(p.stockInitial || 0) + (p.id != null ? (mvtMap[p.id] || 0) : 0)) || '',
+      'Q. Actuel': parseFloat(p.qty.toFixed(3)),
       'Stock min': p.minStock || '',
       'Unité':     p.unit || '',
       'Code-barres': p.barcode || '',
+      'Prix unitaire': p.unitPrice || '',
+      'Valeur':    Math.round(p.value * 100) / 100 || '',
+      'Fournisseur': p.supplier || '',
+      'Stock cible': p.maxStock || '',
     }));
-    download(rows, 'inventaire.xlsx', 'Inventaire');
+    download(rows, `inventaire_${today()}.xlsx`, 'Inventaire');
     notify('Export inventaire réussi');
   }
 
@@ -84,8 +89,10 @@ export default function ImportExport() {
       Famille:    prodMap[m.productId]?.category || '',
       Quantité:   m.quantity,
       Bon:        m.bonNumber || '',
+      Note:       m.note || '',
+      Par:        m.createdBy || '',
     }));
-    download(rows, 'mouvements.xlsx', 'Mouvements');
+    download(rows, `mouvements_${today()}.xlsx`, 'Mouvements');
     notify('Export mouvements réussi');
   }
 
@@ -100,17 +107,20 @@ export default function ImportExport() {
       const prod: Partial<Product> = prodMap[item.productId] || {};
       return {
         'N° Bon':    bon.number || '',
+        Type:        bonTypeInfo(bon.type).label,
         Date:        bon.date?.slice(0, 10),
-        Destination: bon.destination || '',
+        'Destination / Fournisseur': bon.destination || '',
         Libellé:     prod.name || '',
         'Réf':       prod.reference || '',
         Famille:     prod.category || '',
         Unité:       prod.unit || '',
         Quantité:    item.quantity,
+        'Stock théorique': item.expected ?? '',
         Note:        item.note || '',
+        Par:         bon.createdBy || '',
       };
     });
-    download(rows, 'bons_sortie.xlsx', 'Bons');
+    download(rows, `bons_${today()}.xlsx`, 'Bons');
     notify('Export bons réussi');
   }
 
@@ -118,16 +128,22 @@ export default function ImportExport() {
   async function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-    const data = await file.arrayBuffer();
-    const wb   = XLSX.read(data);
-    const ws   = wb.Sheets[wb.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json<ExcelRow>(ws);
+    e.target.value = '';
+    let rows: ExcelRow[];
+    try {
+      const wb = XLSX.read(await file.arrayBuffer());
+      rows = XLSX.utils.sheet_to_json<ExcelRow>(wb.Sheets[wb.SheetNames[0]]);
+    } catch {
+      return notify(`Impossible de lire « ${file.name} » : ce n'est pas un fichier Excel/CSV valide.`, false);
+    }
     if (!rows.length) return notify('Fichier vide ou non reconnu', false);
 
     // Afficher un aperçu des colonnes détectées
     const cols = Object.keys(rows[0]);
+    if (!cols.some(c => NAME_COLUMNS.includes(c))) {
+      return notify(`Aucune colonne de libellé trouvée (attendu : ${NAME_COLUMNS.slice(0, 3).join(', ')}…). Utilisez le modèle.`, false);
+    }
     setPreview({ rows, cols, fileName: file.name });
-    e.target.value = '';
   }
 
   async function confirmImport() {
@@ -137,45 +153,70 @@ export default function ImportExport() {
     let updated = 0;
     let skipped = 0;
 
-    // Charger les produits existants pour dédupliquer
-    const existing = await db.products.toArray();
-    const byRef: Record<string, typeof existing[number]>     = {};
-    const byBarcode: Record<string, typeof existing[number]> = {};
-    existing.forEach(p => {
-      if (p.reference) byRef[p.reference.toLowerCase()] = p;
-      if (p.barcode)   byBarcode[p.barcode] = p;
-    });
+    try {
+      // Tout ou rien : une erreur en cours d'import n'enregistre aucune ligne.
+      await db.transaction('rw', db.products, db.movements, async () => {
+        // Charger les produits existants pour dédupliquer
+        const existing = await db.products.toArray();
+        const netByProduct = netMovementsByProduct(await db.movements.toArray());
+        const byRef: Record<string, typeof existing[number]>     = {};
+        const byBarcode: Record<string, typeof existing[number]> = {};
+        existing.forEach(p => {
+          if (p.reference) byRef[p.reference.toLowerCase()] = p;
+          if (p.barcode)   byBarcode[p.barcode] = p;
+        });
 
-    for (const row of rows) {
-      const name = String(
-        col(row, 'Libellé', 'Désignation', 'Nom', 'name', 'NAME', 'LIBELLE', 'libellé') || ''
-      ).trim();
-      if (!name) { skipped++; continue; }
+        for (const row of rows) {
+          const name = String(col(row, ...NAME_COLUMNS) || '').trim();
+          if (!name) { skipped++; continue; }
 
-      const reference    = String(col(row, 'Réf', 'Référence', 'REF', 'ref', 'reference', 'Code') || '');
-      const barcode      = String(col(row, 'Code-barres', 'Barcode', 'EAN', 'barcode') || '');
-      const category     = String(col(row, 'Famille', 'Catégorie', 'FAMILLE', 'famille', 'category', 'Categorie') || '');
-      const unit         = String(col(row, 'Unité', 'Unite', 'unit', 'UNITE') || 'pièce');
-      const stockInitial = Number(col(row, 'Q. Actuel', 'Q.Actuel', 'Stock actuel', 'Quantité', 'stockInitial', 'Stock', 'QTE')) || 0;
-      const minStock     = Number(col(row, 'Stock min', 'Stock minimum', 'Min', 'minStock')) || 0;
-      const description  = String(col(row, 'Description', 'description', 'Observations', 'Note') || '');
+          const reference   = String(col(row, 'Réf', 'Référence', 'REF', 'ref', 'reference', 'Code') || '').trim();
+          const barcode     = String(col(row, 'Code-barres', 'Barcode', 'EAN', 'barcode') || '').trim();
+          const category    = String(col(row, 'Famille', 'Catégorie', 'FAMILLE', 'famille', 'category', 'Categorie') || '').trim();
+          const unit        = String(col(row, 'Unité', 'Unite', 'unit', 'UNITE') || 'pièce').trim();
+          const qtyCell     = col(row, 'Q. Actuel', 'Q.Actuel', 'Stock actuel', 'Quantité', 'stockInitial', 'Stock', 'QTE');
+          const minCell     = col(row, 'Stock min', 'Stock minimum', 'Min', 'minStock');
+          const description = String(col(row, 'Description', 'description', 'Observations', 'Note') || '');
+          const priceCell   = col(row, 'Prix unitaire', 'Prix', 'PU', 'P.U.', 'unitPrice');
+          const supplier    = String(col(row, 'Fournisseur', 'fournisseur', 'supplier') || '').trim();
+          const maxCell     = col(row, 'Stock cible', 'Stock max', 'Stock maximum', 'maxStock');
 
-      // Chercher un doublon par référence ou code-barres
-      const dupByRef     = reference && byRef[reference.toLowerCase()];
-      const dupByBarcode = barcode   && byBarcode[barcode];
-      const dup          = dupByRef || dupByBarcode;
+          // Chercher un doublon par référence ou code-barres
+          const dupByRef     = reference && byRef[reference.toLowerCase()];
+          const dupByBarcode = barcode   && byBarcode[barcode];
+          const dup          = dupByRef || dupByBarcode;
 
-      if (dup && dup.id != null) {
-        // Mettre à jour le produit existant
-        await db.products.update(dup.id, { name, reference, barcode, category, unit, stockInitial, minStock, description });
-        updated++;
-      } else {
-        const newProd = { name, reference, barcode, category, unit, stockInitial, minStock, description };
-        const newId   = await db.products.add(newProd) as number;
-        if (reference) byRef[reference.toLowerCase()] = { ...newProd, id: newId };
-        if (barcode)   byBarcode[barcode]              = { ...newProd, id: newId };
-        count++;
-      }
+          if (dup && dup.id != null) {
+            // Mettre à jour le produit existant. « Q. Actuel » est le stock réel : on ajuste
+            // le stock initial pour tenir compte des mouvements déjà enregistrés.
+            // Une cellule vide conserve la valeur existante.
+            const changes: Partial<Product> = { name, reference, barcode, category, unit, description };
+            if (qtyCell !== '') changes.stockInitial = stockInitialForTarget(parseNumber(qtyCell), netByProduct.get(dup.id) ?? 0);
+            if (minCell !== '') changes.minStock = Math.max(0, parseNumber(minCell));
+            if (priceCell !== '') changes.unitPrice = Math.max(0, parseNumber(priceCell));
+            if (maxCell !== '') changes.maxStock = Math.max(0, parseNumber(maxCell));
+            if (supplier) changes.supplier = supplier;
+            await db.products.update(dup.id, changes);
+            updated++;
+          } else {
+            const newProd = {
+              name, reference, barcode, category, unit, description,
+              stockInitial: parseNumber(qtyCell),
+              minStock: Math.max(0, parseNumber(minCell)),
+              unitPrice: Math.max(0, parseNumber(priceCell)),
+              maxStock: Math.max(0, parseNumber(maxCell)),
+              supplier,
+            };
+            const newId = await db.products.add(newProd) as number;
+            if (reference) byRef[reference.toLowerCase()] = { ...newProd, id: newId };
+            if (barcode)   byBarcode[barcode]              = { ...newProd, id: newId };
+            count++;
+          }
+        }
+      });
+    } catch (err) {
+      notify(`Import annulé, aucune donnée modifiée : ${err instanceof Error ? err.message : String(err)}`, false);
+      return;
     }
 
     setPreview(null);
@@ -191,10 +232,12 @@ export default function ImportExport() {
       {
         'Réf': '16°16', 'Libellé': 'GOULOTTE 16x16', 'Famille': 'GOULOTTE',
         'Q. Actuel': 10, 'Stock min': 2, 'Unité': 'mètre linéaire', 'Code-barres': '',
+        'Prix unitaire': 4.5, 'Fournisseur': 'Fournisseur A', 'Stock cible': 30,
       },
       {
         'Réf': 'IRD 32', 'Libellé': 'TUBE IRD D32', 'Famille': 'TUBE IRD',
         'Q. Actuel': 5, 'Stock min': 1, 'Unité': 'mètre', 'Code-barres': '',
+        'Prix unitaire': 2.1, 'Fournisseur': 'Fournisseur B', 'Stock cible': '',
       },
     ];
     download(template, 'modele_import_PRESTINFO.xlsx', 'Inventaire');
@@ -283,9 +326,12 @@ export default function ImportExport() {
             <span><span className="font-mono text-indigo-600">Libellé</span> ou Nom → Désignation</span>
             <span><span className="font-mono text-indigo-600">Réf</span> ou Référence → Référence</span>
             <span><span className="font-mono text-indigo-600">Famille</span> ou Catégorie → Famille</span>
-            <span><span className="font-mono text-indigo-600">Q. Actuel</span> → Stock initial</span>
+            <span><span className="font-mono text-indigo-600">Q. Actuel</span> → Stock actuel</span>
             <span><span className="font-mono text-indigo-600">Stock min</span> → Stock minimum</span>
             <span><span className="font-mono text-indigo-600">Unité</span> → Unité</span>
+            <span><span className="font-mono text-indigo-600">Prix unitaire</span> ou PU → Prix</span>
+            <span><span className="font-mono text-indigo-600">Fournisseur</span> → Fournisseur habituel</span>
+            <span><span className="font-mono text-indigo-600">Stock cible</span> → Réapprovisionnement</span>
           </div>
         </div>
 
@@ -319,7 +365,7 @@ export default function ImportExport() {
             onClick={exportMouvements}
           />
           <ExportCard
-            title="Bons de sortie"
+            title="Bons"
             desc={`${bons?.length || 0} bon(s)`}
             iconBg="#d1fae5" iconColor="#059669"
             onClick={exportBons}

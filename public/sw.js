@@ -1,4 +1,4 @@
-const CACHE = 'gestionstock-v1';
+const CACHE = 'gestionstock-v2';
 const STATIC = [
   '/',
   '/index.html',
@@ -25,13 +25,28 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
 
-  // API calls → network first, pas de cache
-  if (url.pathname.startsWith('/api/')) {
-    e.respondWith(fetch(e.request));
+  // Seules les requêtes GET de l'application sont mises en cache ;
+  // l'API (même sur une autre origine) passe toujours par le réseau.
+  if (e.request.method !== 'GET' || url.pathname.startsWith('/api/') || url.origin !== self.location.origin) {
     return;
   }
 
-  // Assets statiques → cache first
+  // Pages (index.html) → réseau d'abord, pour que les mises à jour soient prises en compte ;
+  // cache en secours hors-ligne.
+  if (e.request.mode === 'navigate') {
+    e.respondWith(
+      fetch(e.request)
+        .then(res => {
+          const clone = res.clone();
+          caches.open(CACHE).then(c => c.put('/index.html', clone));
+          return res;
+        })
+        .catch(() => caches.match('/index.html'))
+    );
+    return;
+  }
+
+  // Assets statiques (noms hachés par Vite) → cache d'abord
   e.respondWith(
     caches.match(e.request).then(cached => {
       if (cached) return cached;

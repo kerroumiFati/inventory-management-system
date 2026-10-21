@@ -6,20 +6,25 @@ import type { Express } from 'express';
 interface TestServerOptions {
   adminUsername?: string;
   adminPassword?: string;
+  // Prépare le fichier SQLite avant le démarrage du serveur (ex. tester une migration).
+  setupDb?: (dbPath: string) => void;
 }
 
 export interface TestServer {
   baseUrl: string;
+  // Connexion avec le compte admin ; renvoie le jeton.
+  login: (username?: string, password?: string) => Promise<string>;
   close: () => Promise<void>;
 }
 
 // Démarre une instance de l'app sur un port éphémère, avec une base SQLite
 // temporaire et des identifiants admin connus, isolée des autres tests.
 export async function startTestServer(
-  { adminUsername = 'admin', adminPassword = 'test-password' }: TestServerOptions = {}
+  { adminUsername = 'admin', adminPassword = 'test-password', setupDb }: TestServerOptions = {}
 ): Promise<TestServer> {
   const dir = mkdtempSync(join(tmpdir(), 'stock-manager-test-'));
   process.env.DB_PATH = join(dir, 'stock.db');
+  setupDb?.(process.env.DB_PATH);
   process.env.JWT_SECRET = 'test-secret';
   process.env.ADMIN_USERNAME = adminUsername;
   process.env.ADMIN_PASSWORD = adminPassword;
@@ -32,8 +37,19 @@ export async function startTestServer(
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : 0;
 
+  const baseUrl = `http://localhost:${port}/api`;
   return {
-    baseUrl: `http://localhost:${port}/api`,
+    baseUrl,
+    login: async (username = adminUsername, password = adminPassword) => {
+      const res = await fetch(`${baseUrl}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error);
+      return body.token;
+    },
     close: () => new Promise<void>(resolve => server.close(() => resolve())),
   };
 }

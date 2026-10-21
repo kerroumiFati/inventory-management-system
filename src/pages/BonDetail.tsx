@@ -1,10 +1,14 @@
 import { useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { db, base64ToBlob } from '../db';
+import { db, base64ToBlob, deleteBon as removeBon } from '../db';
 import { useReactToPrint } from 'react-to-print';
-import { Printer, ArrowLeft, Trash2, Download, Eye, FileText, Image } from 'lucide-react';
+import { Printer, ArrowLeft, Trash2, Download, Eye, FileText, Image, PackageCheck } from 'lucide-react';
 import type { NavigateFn } from '../types';
 import type { Product } from '../../shared/schemas';
+import { bonTypeInfo, ORDER_STATUS } from '@/lib/bons';
+import { formatMoney, formatQty, orderProgress } from '@/lib/stock';
+import { receptionDraft, replaceDraft } from '@/lib/drafts';
+import { CURRENCY } from '../config';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 
@@ -14,9 +18,24 @@ interface BonDetailProps {
 }
 
 export default function BonDetail({ bonId, navigate }: BonDetailProps) {
-  const bon      = useLiveQuery(() => bonId ? db.bons.get(bonId) : undefined, [bonId]);
+  // undefined = chargement en cours, null = bon introuvable (supprimé, lien obsolète…)
+  const bon      = useLiveQuery(async () => (bonId ? await db.bons.get(bonId) : undefined) ?? null, [bonId]);
   const items    = useLiveQuery(() => bonId ? db.bonItems.where('bonId').equals(bonId).toArray() : [], [bonId]);
   const products = useLiveQuery(() => db.products.toArray(), []);
+  // Commande : réceptions qui la soldent ; réception : commande d'origine.
+  const linked = useLiveQuery(async () => {
+    if (!bon) return null;
+    if (bon.type === 'commande' && bon.uid) {
+      const receptions = await db.bons.where('orderUid').equals(bon.uid).sortBy('date');
+      const ids = receptions.map(r => r.id!);
+      const receivedItems = ids.length ? await db.bonItems.where('bonId').anyOf(ids).toArray() : [];
+      return { receptions, receivedItems, order: undefined };
+    }
+    if (bon.type === 'entree' && bon.orderUid) {
+      return { receptions: [], receivedItems: [], order: await db.bons.where('uid').equals(bon.orderUid).first() };
+    }
+    return null;
+  }, [bon]);
   const printRef = useRef<HTMLDivElement>(null);
 
   const prodMap: Record<number, Product> = {};
@@ -25,11 +44,9 @@ export default function BonDetail({ bonId, navigate }: BonDetailProps) {
   const handlePrint = useReactToPrint({ contentRef: printRef });
 
   async function deleteBon() {
-    if (!confirm('Supprimer ce bon définitivement ?')) return;
-    if (bonId == null || !bon) return;
-    await db.bonItems.where('bonId').equals(bonId).delete();
-    await db.movements.where('bonNumber').equals(bon.number).delete();
-    await db.bons.delete(bonId);
+    if (!bon) return;
+    if (!confirm(`Supprimer le bon ${bon.number} ?\n\n${bonTypeInfo(bon.type).deleteEffect}`)) return;
+    await removeBon(bon);
     navigate('bons');
   }
 
@@ -51,9 +68,34 @@ export default function BonDetail({ bonId, navigate }: BonDetailProps) {
     URL.revokeObjectURL(url);
   }
 
-  if (!bon) return <div className="p-8 text-center text-slate-400 text-sm">Chargement...</div>;
+  if (bon === undefined) return <div className="p-8 text-center text-slate-400 text-sm">Chargement...</div>;
+  if (bon === null) {
+    return (
+      <div className="p-8 text-center">
+        <p className="text-slate-500 text-sm mb-4">Ce bon n'existe pas ou a été supprimé.</p>
+        <Button variant="outline" onClick={() => navigate('bons')}>
+          <ArrowLeft size={15} /> Retour aux bons
+        </Button>
+      </div>
+    );
+  }
 
   const fileIsImage = bon.fileType?.startsWith('image/');
+  const info        = bonTypeInfo(bon.type);
+  const isCommande  = bon.type === 'commande';
+  const isInventory = bon.type === 'inventaire';
+  const progress    = isCommande && items ? orderProgress(items, linked?.receivedItems ?? []) : null;
+  const receivedBy  = new Map(progress?.lines.map(l => [l.productId, l]) ?? []);
+  const priced      = isCommande && !!items?.some(i => Number(prodMap[i.productId]?.unitPrice) > 0);
+  const orderTotal  = priced ? (items ?? []).reduce((s, i) => s + i.quantity * (Number(prodMap[i.productId]?.unitPrice) || 0), 0) : 0;
+  const SECOND_SIGNATURE: Record<string, string> = {
+    entree: 'Signature livreur', commande: 'Cachet fournisseur', inventaire: 'Signature contrôleur',
+  };
+
+  function receive() {
+    if (!bon || !progress) return;
+    if (replaceDraft('entree', receptionDraft(bon, progress.lines))) navigate('entree');
+  }
 
   return (
     <div>
@@ -66,6 +108,11 @@ export default function BonDetail({ bonId, navigate }: BonDetailProps) {
           <ArrowLeft size={16} /> Retour aux bons
         </button>
         <div className="flex gap-2">
+          {progress && progress.status !== 'recue' && (
+            <Button variant="outline" onClick={receive}>
+              <PackageCheck size={15} /> Réceptionner
+            </Button>
+          )}
           <Button variant="outline" className="border-red-200 text-red-600 hover:bg-red-50 hover:text-red-600" onClick={deleteBon}>
             <Trash2 size={15} /> Supprimer
           </Button>
@@ -81,8 +128,15 @@ export default function BonDetail({ bonId, navigate }: BonDetailProps) {
         {/* En-tête */}
         <div className="flex items-start justify-between pb-6 mb-6" style={{ borderBottom: '2px solid #0f172a' }}>
           <div>
-            <h1 className="text-2xl font-bold text-slate-900 tracking-tight">BON DE SORTIE</h1>
-            <p className="text-slate-400 text-sm mt-1">Gestion des stocks</p>
+            <h1 className="text-2xl font-bold text-slate-900 tracking-tight">{info.title}</h1>
+            <p className="text-slate-400 text-sm mt-1">
+              Gestion des stocks{bon.createdBy && <> · saisi par <span className="text-slate-600">{bon.createdBy}</span></>}
+            </p>
+            {progress && (
+              <span className={`inline-block mt-2 text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wide ${ORDER_STATUS[progress.status].className}`}>
+                {ORDER_STATUS[progress.status].label}
+              </span>
+            )}
           </div>
           <div className="text-right">
             <div className="text-xl font-bold" style={{ color: '#4f46e5' }}>{bon.number}</div>
@@ -97,7 +151,7 @@ export default function BonDetail({ bonId, navigate }: BonDetailProps) {
           <div className="grid grid-cols-2 gap-6 mb-6 p-4 rounded-lg" style={{ background: '#f8fafc' }}>
             {bon.destination && (
               <div>
-                <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">Destination</div>
+                <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">{info.partyLabel}</div>
                 <div className="font-medium text-slate-800">{bon.destination}</div>
               </div>
             )}
@@ -117,12 +171,23 @@ export default function BonDetail({ bonId, navigate }: BonDetailProps) {
               <th className="text-left px-4 py-3 font-semibold rounded-tl-lg text-xs uppercase tracking-wider">Réf.</th>
               <th className="text-left px-4 py-3 font-semibold text-xs uppercase tracking-wider">Désignation</th>
               <th className="text-center px-4 py-3 font-semibold text-xs uppercase tracking-wider">Unité</th>
-              <th className="text-center px-4 py-3 font-semibold text-xs uppercase tracking-wider rounded-tr-lg">Qté</th>
+              {isInventory && <th className="text-center px-4 py-3 font-semibold text-xs uppercase tracking-wider">Théorique</th>}
+              <th className="text-center px-4 py-3 font-semibold text-xs uppercase tracking-wider">{isInventory ? 'Compté' : 'Qté'}</th>
+              {isInventory && <th className="text-center px-4 py-3 font-semibold text-xs uppercase tracking-wider">Écart</th>}
+              {isCommande && <th className="text-center px-4 py-3 font-semibold text-xs uppercase tracking-wider no-print">Reçue</th>}
+              {priced && (
+                <>
+                  <th className="text-right px-4 py-3 font-semibold text-xs uppercase tracking-wider">P.U.</th>
+                  <th className="text-right px-4 py-3 font-semibold text-xs uppercase tracking-wider">Montant</th>
+                </>
+              )}
             </tr>
           </thead>
           <tbody>
             {items?.map((item, i) => {
               const p = prodMap[item.productId];
+              const diff = item.expected != null ? parseFloat((item.quantity - item.expected).toFixed(3)) : 0;
+              const got = receivedBy.get(item.productId);
               return (
                 <tr key={item.id} style={{ background: i % 2 === 0 ? 'white' : '#f8fafc' }}>
                   <td className="px-4 py-3 text-slate-400">{p?.reference || '—'}</td>
@@ -131,12 +196,57 @@ export default function BonDetail({ bonId, navigate }: BonDetailProps) {
                     {item.note && <div className="text-xs text-slate-400 mt-0.5 italic">{item.note}</div>}
                   </td>
                   <td className="px-4 py-3 text-center text-slate-500">{p?.unit || '—'}</td>
-                  <td className="px-4 py-3 text-center font-bold text-slate-900">{item.quantity}</td>
+                  {isInventory && <td className="px-4 py-3 text-center text-slate-500">{item.expected != null ? formatQty(item.expected) : '—'}</td>}
+                  <td className="px-4 py-3 text-center font-bold text-slate-900">{formatQty(item.quantity)}</td>
+                  {isInventory && (
+                    <td className={`px-4 py-3 text-center font-semibold ${diff > 0 ? 'text-emerald-600' : diff < 0 ? 'text-red-600' : 'text-slate-400'}`}>
+                      {item.expected == null ? '—' : diff === 0 ? 'OK' : `${diff > 0 ? '+' : '−'}${formatQty(Math.abs(diff))}`}
+                    </td>
+                  )}
+                  {isCommande && (
+                    <td className={`px-4 py-3 text-center no-print ${got && got.remaining <= 0 ? 'text-emerald-600 font-semibold' : 'text-slate-500'}`}>
+                      {got ? formatQty(got.received) : '0'}
+                    </td>
+                  )}
+                  {priced && (
+                    <>
+                      <td className="px-4 py-3 text-right text-slate-500">{formatMoney(Number(p?.unitPrice) || 0)}</td>
+                      <td className="px-4 py-3 text-right font-semibold">{formatMoney(item.quantity * (Number(p?.unitPrice) || 0))}</td>
+                    </>
+                  )}
                 </tr>
               );
             })}
           </tbody>
         </table>
+
+        {priced && (
+          <div className="flex justify-end -mt-4 mb-8 text-sm">
+            <span className="text-slate-500 mr-4 uppercase text-xs font-semibold tracking-wider self-center">Total</span>
+            <span className="font-bold text-slate-900">{formatMoney(orderTotal, CURRENCY)}</span>
+          </div>
+        )}
+
+        {(linked?.order || !!linked?.receptions.length) && (
+          <div className="mb-6 text-sm text-slate-600 no-print">
+            {linked.order && (
+              <>Réception de la commande{' '}
+                <button onClick={() => navigate('bon-detail', { bonId: linked.order!.id })} className="font-semibold text-indigo-600 hover:underline">{linked.order.number}</button>
+              </>
+            )}
+            {!!linked.receptions.length && (
+              <>Réception(s) :{' '}
+                {linked.receptions.map((r, i) => (
+                  <span key={r.id}>
+                    {i > 0 && ', '}
+                    <button onClick={() => navigate('bon-detail', { bonId: r.id })} className="font-semibold text-indigo-600 hover:underline">{r.number}</button>
+                    <span className="text-slate-400"> du {new Date(r.date).toLocaleDateString('fr-FR')}</span>
+                  </span>
+                ))}
+              </>
+            )}
+          </div>
+        )}
 
         {/* Signatures */}
         <div className="grid grid-cols-2 gap-10 pt-6" style={{ borderTop: '1px solid #e2e8f0' }}>
@@ -147,7 +257,7 @@ export default function BonDetail({ bonId, navigate }: BonDetailProps) {
             </div>
           </div>
           <div className="text-center">
-            <p className="text-xs text-slate-400 mb-12">Signature demandeur</p>
+            <p className="text-xs text-slate-400 mb-12">{SECOND_SIGNATURE[bon.type] ?? 'Signature demandeur'}</p>
             <div style={{ borderTop: '1px solid #94a3b8' }} className="pt-1">
               <span className="text-xs text-slate-300">Nom et signature</span>
             </div>

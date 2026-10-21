@@ -1,10 +1,25 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { checkServer, pushToServer, pullFromServer } from '../services/sync';
-import { Upload, Download, RefreshCw, CheckCircle, AlertCircle } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { useQuery, useMutation } from '@tanstack/react-query';
+import { useLiveQuery } from 'dexie-react-hooks';
+import { checkServer, syncClient, SyncError, type SyncResult } from '../services/sync';
+import { useAuth } from '../contexts/useAuth';
+import { RefreshCw, CheckCircle, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
+const AUTO_SYNC_INTERVAL_MS = 60_000;
+// Délai après une modification locale avant l'envoi automatique (regroupe les saisies rapprochées).
+const AUTO_SYNC_DEBOUNCE_MS = 3_000;
+
+function resultNotices(r: SyncResult): string[] {
+  const notes: string[] = [];
+  if (r.overridden) notes.push(`${r.overridden} modification(s) de ce poste remplacée(s) par une version plus récente venant d'un autre poste.`);
+  if (r.orphans) notes.push(`${r.orphans} ligne(s) reçue(s) ignorée(s) : produit ou bon absent de ce poste.`);
+  return notes;
+}
+
 export default function SyncBar() {
-  const queryClient = useQueryClient();
+  const { logout } = useAuth();
+  const [notices, setNotices] = useState<string[]>([]);
 
   const { data: online = false, isFetching: checking, refetch } = useQuery({
     queryKey: ['server-status'],
@@ -12,41 +27,49 @@ export default function SyncBar() {
     refetchInterval: 15000,
   });
 
-  const pushMutation = useMutation({
-    mutationFn: pushToServer,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['server-status'] }),
-    onSettled: () => { setTimeout(() => pushMutation.reset(), 4000); },
+  // Recalculé à chaque écriture locale (useLiveQuery observe les tables lues).
+  const pending = useLiveQuery(() => syncClient.pendingCount(), [], 0);
+
+  const syncMutation = useMutation({
+    mutationFn: () => syncClient.sync(),
+    onSuccess: r => setNotices(resultNotices(r)),
   });
 
-  const pullMutation = useMutation({
-    mutationFn: pullFromServer,
-    onSettled: () => { setTimeout(() => pullMutation.reset(), 4000); },
+  const error = syncMutation.error;
+  const errorKind = error instanceof SyncError ? error.kind : 'other';
+  // Après une session expirée, on n'insiste pas : l'utilisateur doit se reconnecter.
+  const authBlocked = syncMutation.isError && errorKind === 'auth';
+
+  // Lancement conditionnel, tenu à jour à chaque rendu pour que les minuteries
+  // lisent l'état courant sans être relancées.
+  const { mutate, isPending } = syncMutation;
+  const trySync = useRef(() => {});
+  useEffect(() => {
+    trySync.current = () => {
+      if (online && !authBlocked && !isPending) mutate();
+    };
   });
 
-  function handlePull() {
-    if (!confirm('Remplacer les données locales par celles du serveur ?')) return;
-    pullMutation.mutate();
-  }
+  // Synchro au démarrage / retour de connexion, puis périodique.
+  useEffect(() => {
+    if (online) trySync.current();
+  }, [online]);
+  useEffect(() => {
+    const timer = setInterval(() => trySync.current(), AUTO_SYNC_INTERVAL_MS);
+    const onOnline = () => { refetch(); };
+    window.addEventListener('online', onOnline);
+    return () => { clearInterval(timer); window.removeEventListener('online', onOnline); };
+  }, [refetch]);
 
-  const busy = pushMutation.isPending || pullMutation.isPending;
+  // Envoi peu après chaque modification locale.
+  useEffect(() => {
+    if (!pending) return;
+    const timer = setTimeout(() => trySync.current(), AUTO_SYNC_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [pending]);
 
-  const activeResult = pushMutation.isSuccess || pushMutation.isError
-    ? pushMutation
-    : pullMutation.isSuccess || pullMutation.isError
-      ? pullMutation
-      : null;
-
-  const successText = pushMutation.isSuccess
-    ? `${pushMutation.data.synced.products} produits · ${pushMutation.data.synced.movements} mouvements · ${pushMutation.data.synced.bons} bons`
-    : pullMutation.isSuccess
-      ? `${pullMutation.data.products} produits · ${pullMutation.data.movements} mouvements · ${pullMutation.data.bons} bons`
-      : '';
-
-  const errorText = pushMutation.error instanceof Error
-    ? pushMutation.error.message
-    : pullMutation.error instanceof Error
-      ? pullMutation.error.message
-      : '';
+  const lastSync = syncClient.lastSyncDate();
+  const showError = syncMutation.isError && errorKind !== 'network';
 
   return (
     <div className="mx-3 mb-3 rounded-xl overflow-hidden" style={{ background: '#1e293b' }}>
@@ -69,57 +92,59 @@ export default function SyncBar() {
           disabled={checking}
           className="text-slate-600 hover:text-slate-400 transition-colors disabled:opacity-40"
           title="Vérifier la connexion"
+          aria-label="Vérifier la connexion"
         >
           <RefreshCw size={11} className={checking ? 'animate-spin' : ''} />
         </button>
       </div>
 
-      {/* Boutons sync */}
+      {/* État des données locales */}
+      <div className="px-3.5 pb-2 text-[11px]" style={{ color: pending ? '#fcd34d' : '#64748b' }}>
+        {syncMutation.isPending
+          ? 'Synchronisation…'
+          : pending
+            ? `● ${pending} modification(s) en attente d'envoi`
+            : lastSync
+              ? `À jour — ${lastSync.toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}`
+              : 'Jamais synchronisé'}
+      </div>
+
       {online && (
-        <div className="flex gap-1.5 px-3 pb-3">
+        <div className="px-3 pb-3">
           <Button
-            onClick={() => pushMutation.mutate()}
-            disabled={busy}
-            title="Envoyer vers le serveur SQLite"
+            onClick={() => { syncMutation.reset(); syncMutation.mutate(); }}
+            disabled={syncMutation.isPending}
+            title="Envoyer les modifications de ce poste et recevoir celles des autres"
             size="sm"
-            className="flex-1 h-8 text-xs"
+            className="w-full h-8 text-xs"
           >
-            {pushMutation.isPending
-              ? <RefreshCw size={11} className="animate-spin" />
-              : <Upload size={11} />
-            }
-            Envoyer
-          </Button>
-          <Button
-            onClick={handlePull}
-            disabled={busy}
-            title="Recevoir depuis le serveur SQLite"
-            size="sm"
-            className="flex-1 h-8 text-xs bg-teal-700 hover:bg-teal-700 hover:opacity-90"
-          >
-            {pullMutation.isPending
-              ? <RefreshCw size={11} className="animate-spin" />
-              : <Download size={11} />
-            }
-            Recevoir
+            <RefreshCw size={11} className={syncMutation.isPending ? 'animate-spin' : ''} />
+            Synchroniser
           </Button>
         </div>
       )}
 
-      {/* Message résultat */}
-      {activeResult && (
-        <div
-          className="mx-3 mb-3 px-3 py-2 rounded-lg flex items-start gap-2 text-xs"
-          style={activeResult.isSuccess
-            ? { background: '#064e3b', color: '#6ee7b7' }
-            : { background: '#450a0a', color: '#fca5a5' }
-          }
-        >
-          {activeResult.isSuccess
-            ? <CheckCircle size={12} className="shrink-0 mt-0.5" />
-            : <AlertCircle size={12} className="shrink-0 mt-0.5" />
-          }
-          <span>{activeResult.isSuccess ? successText : errorText}</span>
+      {showError && (
+        <div className="mx-3 mb-3 px-3 py-2 rounded-lg text-xs" style={{ background: '#450a0a', color: '#fca5a5' }}>
+          <div className="flex items-start gap-2">
+            <AlertCircle size={12} className="shrink-0 mt-0.5" />
+            <span>{error?.message}</span>
+          </div>
+          {errorKind === 'auth' && (
+            <button onClick={logout} className="mt-2 underline hover:text-white">
+              Se reconnecter
+            </button>
+          )}
+        </div>
+      )}
+
+      {!showError && notices.length > 0 && (
+        <div className="mx-3 mb-3 px-3 py-2 rounded-lg text-xs" style={{ background: '#422006', color: '#fcd34d' }}>
+          <div className="flex items-start gap-2">
+            <CheckCircle size={12} className="shrink-0 mt-0.5" />
+            <div className="space-y-1">{notices.map(n => <p key={n}>{n}</p>)}</div>
+          </div>
+          <button onClick={() => setNotices([])} className="mt-2 underline hover:text-white">OK</button>
         </div>
       )}
     </div>

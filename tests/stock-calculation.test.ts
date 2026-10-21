@@ -44,6 +44,14 @@ describe('findStockIssues', () => {
     assert.deepEqual(issues[0], { name: 'Vis', requested: 10, available: 5, unit: 'pièce' });
   });
 
+  test('additionne les lignes portant sur le même produit', () => {
+    // 2 lignes de 6 pour un stock de 10 : chaque ligne passe seule, mais pas le total.
+    const stock = new Map([[1, { name: 'Vis', unit: 'pièce', available: 10 }]]);
+    const issues = findStockIssues([{ productId: 1, quantity: 6 }, { productId: '1', quantity: '6' }], stock);
+    assert.equal(issues.length, 1);
+    assert.equal(issues[0].requested, 12);
+  });
+
   test('ignore les lignes sans produit ou sans quantité', () => {
     const stock = new Map();
     const issues = findStockIssues([{ productId: null as unknown as number, quantity: 10 }, { productId: 1, quantity: 0 }], stock);
